@@ -46,4 +46,4 @@ user-uninstall:
 
 .PHONY: build
 build:
-	go build -tags wayland 0xADE/xpass/cmd/xpass
+	go build -ldflags "-s" -tags wayland,linux 0xADE/xpass/cmd/xpass
