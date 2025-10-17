@@ -1,12 +1,16 @@
 # Xpass
 
-The GUI for password management. The part of the infrastructure around
-[standard unix password manager](https://www.passwordstore.org/)
-manager.
+A GUI for the [standard unix password manager](https://www.passwordstore.org/).
 
-Made with [Go](https://go.dev) + [Fyne](https://fyne.io) toolkit.
+Made with [Go](https://go.dev) and the [Gio](https://gioui.org) UI toolkit.
 
-Features in development:
+## Features
 
-- fast match and navigate your password database
-- add/edit entries
+- Fast search and navigation of your password database.
+- Copy passwords to the clipboard.
+- Clipboard is automatically cleared after 15 seconds.
+
+## Development
+
+To build and run:
+`make run`

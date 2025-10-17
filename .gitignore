@@ -1,4 +1,4 @@
-fyne-cross/
+build/
 
 # Binaries for programs and plugins
 *.exe

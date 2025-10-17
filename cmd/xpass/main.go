@@ -1,26 +1,30 @@
 package main
 
 import (
-	"context"
+	"log"
+	"os"
 
 	"0xADE/xpass/config"
 	"0xADE/xpass/storage"
 	"0xADE/xpass/ui"
-
-	"fyne.io/fyne/v2"
 )
 
 func main() {
-	var err error
-	ctx := context.Background()
-
-	var cfg *config.Config
-	if cfg, err = config.Get(); err != nil {
-		fyne.LogError("can't read configuration properly", err)
+	cfg, err := config.Get()
+	if err != nil {
+		log.Printf("Warning: can't read configuration properly: %v", err)
+		cfg = &config.Config{}
 	}
 
-	storage.Init(cfg.PasswordStoreDir, cfg.PasswordStoreKey)
-	items := []string{"Item 1", "Item 2", "Item 3", "Item 4", "Элемент 5"}
-	app, content := ui.Make(items)
-	ui.Run(ctx, app, content)
+	store, err := storage.Init(cfg.PasswordStoreDir, cfg.PasswordStoreKey)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+
+	app := ui.New(store)
+	if err := app.Run(); err != nil {
+		log.Fatalf("Application error: %v", err)
+	}
+	
+	os.Exit(0)
 }
