@@ -6,11 +6,12 @@ Made with [Go](https://go.dev) and the [Gio](https://gioui.org) UI toolkit.
 
 ## Features
 
-- Fast search and navigation of your password database.
+- Fast search (by filter) and navigation of your password database.
 - Copy passwords to the clipboard.
-- Clipboard is automatically cleared after 15 seconds.
+- Clipboard is automatically cleared after 60 seconds (customizable).
+- Support markdown formatting in the password data.
 
-## Development
+## Status
 
-To build and run:
-`make run`
+Usable but still in development.
+

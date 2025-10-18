@@ -6,11 +6,11 @@ import (
 
 // Config keeps configuration of `pass`. For details see `man pass`.
 type Config struct {
-	PasswordStoreDir         string `envconfig:"PASSWORD_STORE_DIR"`
+	PasswordStoreDir         string `envconfig:"PASSWORD_STORE_DIR" default:"~/.password-store"`
 	PasswordStoreKey         string `envconfig:"PASSWORD_STORE_KEY"`
 	PasswordStoreGpgOpts     string `envconfig:"PASSWORD_STORE_GPG_OPTS"`
 	PasswordStoreUmask       string `envconfig:"PASSWORD_STORE_KEY"`
-	PasswordStoreClipSeconds int    `envconfig:"PASSWORD_STORE_CLIP_TIME" default:"30"` // in seconds
+	PasswordStoreClipSeconds int    `envconfig:"PASSWORD_STORE_CLIP_TIME" default:"60" description:"clipboard cleanup time in seconds"`
 }
 
 func Get() (*Config, error) {

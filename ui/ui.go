@@ -174,6 +174,12 @@ func (ui *UI) copyFieldToClipboard(value string) {
 }
 
 func (ui *UI) clearClipboard() {
+	// FIXME bad concurrency pattern here, just for development time
+	// TODO move it to dedicated routine with channel interaction
+	if ui.countdown > 0 {
+		ui.countdown = float32(ui.config.PasswordStoreClipSeconds)
+		return
+	}
 	if ui.countingDown {
 		ui.countdownDone <- true
 	}
@@ -335,10 +341,20 @@ func (ui *UI) loop() error {
 }
 
 func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-		layout.Flexed(1, ui.layoutLeftPane),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-		layout.Rigid(ui.layoutRightPane),
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Flexed(1, ui.layoutLeftPane),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(ui.layoutRightPane),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if ui.countingDown {
+				return ui.layoutProgressBar(gtx)
+			}
+			return layout.Dimensions{}
+		}),
 	)
 }
 
@@ -547,6 +563,57 @@ func (ui *UI) layoutCountdown(gtx layout.Context) layout.Dimensions {
 	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
 
+func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
+	barHeight := gtx.Dp(unit.Dp(4))
+	fullWidth := gtx.Constraints.Max.X
+
+	// Calculate filled width based on countdown progress
+	filledWidth := int(float32(fullWidth) * ui.countdown)
+	if filledWidth < 0 {
+		filledWidth = 0
+	}
+	if filledWidth > fullWidth {
+		filledWidth = fullWidth
+	}
+
+	// Draw background (empty part)
+	bgRect := image.Pt(fullWidth, barHeight)
+	defer clip.Rect{Max: bgRect}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: color.NRGBA{R: 60, G: 60, B: 60, A: 255}}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	// Draw filled part (progress)
+	if filledWidth > 0 {
+		filledRect := image.Pt(filledWidth, barHeight)
+		defer clip.Rect{Max: filledRect}.Push(gtx.Ops).Pop()
+		// Green-to-yellow-to-red gradient based on progress
+		var progressColor color.NRGBA
+		if ui.countdown > 0.5 {
+			// Green to yellow (1.0 -> 0.5)
+			t := (ui.countdown - 0.5) * 2
+			progressColor = color.NRGBA{
+				R: uint8(255 * (1 - t)),
+				G: 200,
+				B: 0,
+				A: 255,
+			}
+		} else {
+			// Yellow to red (0.5 -> 0.0)
+			t := ui.countdown * 2
+			progressColor = color.NRGBA{
+				R: 255,
+				G: uint8(200 * t),
+				B: 0,
+				A: 255,
+			}
+		}
+		paint.ColorOp{Color: progressColor}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+	}
+
+	return layout.Dimensions{Size: image.Pt(fullWidth, barHeight)}
+}
+
 func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.Dimensions {
 	// Get or create field widget for this key
 	fw, exists := ui.fieldWidgets[pair.Key]
@@ -579,15 +646,53 @@ func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.
 				label.Color = color.NRGBA{R: 238, G: 238, B: 238, A: 255}
 				label.TextSize = unit.Sp(18)
 				label.Font.Weight = font.Bold
-				return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, label.Layout)
+				return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, label.Layout)
 			})
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return fw.clickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				// First render the editor to get its dimensions
+				macro := op.Record(gtx.Ops)
 				editor := material.Editor(ui.theme, &fw.editor, "")
 				editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
 				editor.TextSize = unit.Sp(18)
-				return editor.Layout(gtx)
+				dims := editor.Layout(gtx)
+				call := macro.Stop()
+
+				// Draw rounded border using selection color
+				borderColor := color.NRGBA{R: 100, G: 150, B: 200, A: 255} // Same as selection but fully opaque
+				borderRadius := gtx.Dp(unit.Dp(4))
+				borderWidth := gtx.Dp(unit.Dp(1))
+
+				// Create outer rounded rectangle path for border
+				outerRect := clip.RRect{
+					Rect: image.Rectangle{Max: dims.Size},
+					NW:   borderRadius, NE: borderRadius, SW: borderRadius, SE: borderRadius,
+				}
+
+				// Create inner rounded rectangle path for clipping
+				innerRect := clip.RRect{
+					Rect: image.Rectangle{
+						Min: image.Pt(borderWidth, borderWidth),
+						Max: image.Pt(dims.Size.X-borderWidth, dims.Size.Y-borderWidth),
+					},
+					NW: borderRadius - borderWidth, NE: borderRadius - borderWidth,
+					SW: borderRadius - borderWidth, SE: borderRadius - borderWidth,
+				}
+
+				// Draw border by filling outer rect and subtracting inner rect
+				defer outerRect.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: borderColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+
+				// Subtract inner area to create border effect
+				defer innerRect.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: color.NRGBA{A: 0}}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+
+				// Draw the editor content on top
+				call.Add(gtx.Ops)
+				return dims
 			})
 		}),
 	)
