@@ -63,6 +63,11 @@ type UI struct {
 	fieldWidgets map[string]*fieldWidget
 	kvPairs      []KeyValuePair
 	markdownText string
+
+	// Filter debouncing
+	queryInput   chan string
+	queryResults chan []passcard.StoredItem
+	stopFilter   chan struct{}
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -76,6 +81,9 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		showRichText:        true,
 		lastMetadataItemIdx: -1, // Force initial update
 		fieldWidgets:        make(map[string]*fieldWidget),
+		queryInput:          make(chan string, 64),
+		queryResults:        make(chan []passcard.StoredItem, 1),
+		stopFilter:          make(chan struct{}),
 	}
 
 	ui.searchEditor.SingleLine = true
@@ -93,7 +101,42 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	})
 
 	ui.updateQuery()
+	ui.startFilterWorker()
 	return ui
+}
+
+func (ui *UI) startFilterWorker() {
+	go func() {
+		var timer *time.Timer
+		var latestQuery string
+		debounceDelay := 50 * time.Millisecond
+
+		for {
+			select {
+			case query := <-ui.queryInput:
+				latestQuery = query
+				if timer != nil {
+					timer.Stop()
+				}
+				timer = time.AfterFunc(debounceDelay, func() {
+					filtered := ui.storage.Query(latestQuery)
+					select {
+					case ui.queryResults <- filtered:
+						if ui.window != nil {
+							ui.window.Invalidate()
+						}
+					default:
+						// Skip if channel full
+					}
+				})
+			case <-ui.stopFilter:
+				if timer != nil {
+					timer.Stop()
+				}
+				return
+			}
+		}
+	}()
 }
 
 func (ui *UI) updateQuery() {
@@ -189,10 +232,22 @@ func (ui *UI) loop() error {
 	for {
 		switch e := ui.window.Event().(type) {
 		case app.DestroyEvent:
+			close(ui.stopFilter)
 			return e.Err
 
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
+
+			// Process filter results
+			select {
+			case filtered := <-ui.queryResults:
+				ui.filtered = filtered
+				if ui.selectedIdx >= len(ui.filtered) {
+					ui.selectedIdx = 0
+				}
+			default:
+				// No results ready
+			}
 
 			if !ui.initialized {
 				gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
@@ -262,7 +317,11 @@ func (ui *UI) loop() error {
 				switch ev.(type) {
 				case widget.ChangeEvent:
 					ui.query = ui.searchEditor.Text()
-					ui.updateQuery()
+					select {
+					case ui.queryInput <- ui.query:
+					default:
+						// Channel full, skip this update
+					}
 				case widget.SubmitEvent:
 					ui.copyToClipboard()
 				}
