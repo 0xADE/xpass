@@ -11,25 +11,25 @@ import (
 	"strings"
 )
 
-type Password struct {
+type StoredItem struct {
 	Name string
 	Path string
 }
 
-func (p *Password) decrypt() (string, error) {
+func (p *StoredItem) decrypt() (string, error) {
 	cmd := exec.Command("gpg", "--decrypt", "--quiet", "--batch", p.Path)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
-	
+
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
-	
+
 	return out.String(), nil
 }
 
-func (p *Password) Raw() string {
+func (p *StoredItem) Raw() string {
 	file, err := os.Open(p.Path)
 	if err != nil {
 		return ""
@@ -42,30 +42,30 @@ func (p *Password) Raw() string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
-func (p *Password) Metadata() string {
+func (p *StoredItem) Metadata() string {
 	decrypted, err := p.decrypt()
 	if err != nil {
 		return ""
 	}
-	
+
 	lines := strings.SplitN(decrypted, "\n", 2)
 	if len(lines) < 2 {
 		return ""
 	}
-	
+
 	return strings.TrimSpace(lines[1])
 }
 
-func (p *Password) Password() string {
+func (p *StoredItem) Password() string {
 	decrypted, err := p.decrypt()
 	if err != nil {
 		return ""
 	}
-	
+
 	lines := strings.SplitN(decrypted, "\n", 2)
 	if len(lines) == 0 {
 		return ""
 	}
-	
+
 	return strings.TrimSpace(lines[0])
 }

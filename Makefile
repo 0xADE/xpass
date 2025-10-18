@@ -10,3 +10,11 @@ run: build
 .PHONY: clean
 clean:
 	rm -rf build
+
+.PHONY: lint
+lint:
+	go tool golangci-lint run ./...
+
+.PHONY: tidy
+tidy:
+	go mod tidy

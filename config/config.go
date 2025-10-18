@@ -10,7 +10,7 @@ type Config struct {
 	PasswordStoreKey         string `envconfig:"PASSWORD_STORE_KEY"`
 	PasswordStoreGpgOpts     string `envconfig:"PASSWORD_STORE_GPG_OPTS"`
 	PasswordStoreUmask       string `envconfig:"PASSWORD_STORE_KEY"`
-	PasswordStoreClipSeconds int    `envconfig:"PASSWORD_STORE_CLIP_TIME"` // in seconds
+	PasswordStoreClipSeconds int    `envconfig:"PASSWORD_STORE_CLIP_TIME" default:"30"` // in seconds
 }
 
 func Get() (*Config, error) {

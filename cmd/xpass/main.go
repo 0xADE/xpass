@@ -21,10 +21,10 @@ func main() {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
 
-	app := ui.New(store)
+	app := ui.New(store, cfg)
 	if err := app.Run(); err != nil {
 		log.Fatalf("Application error: %v", err)
 	}
-	
+
 	os.Exit(0)
 }

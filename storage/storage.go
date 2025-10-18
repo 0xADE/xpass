@@ -21,7 +21,7 @@ type Subscriber func(status string)
 type Storage struct {
 	path        string
 	key         string
-	passwords   []passcard.Password
+	passwords   []passcard.StoredItem
 	subscribers []Subscriber
 }
 
@@ -36,12 +36,12 @@ func Init(basePath, key string) (*Storage, error) {
 	return s, nil
 }
 
-func (s *Storage) Query(query string) []passcard.Password {
+func (s *Storage) Query(query string) []passcard.StoredItem {
 	if query == "" {
 		return s.passwords
 	}
 
-	var hits []passcard.Password
+	var hits []passcard.StoredItem
 	lowerQuery := strings.ToLower(query)
 	queryParts := strings.Split(lowerQuery, " ")
 
@@ -61,6 +61,13 @@ func (s *Storage) Query(query string) []passcard.Password {
 	return hits
 }
 
+func (s *Storage) NameByIdx(idx int) string {
+	if idx >= len(s.passwords) {
+		return ""
+	}
+	return s.passwords[idx].Name
+}
+
 func (s *Storage) Subscribe(cb Subscriber) {
 	s.subscribers = append(s.subscribers, cb)
 }
@@ -73,8 +80,10 @@ func (s *Storage) publishUpdate(status string) {
 
 func (s *Storage) IndexAll() {
 	s.passwords = nil
-	filepath.Walk(s.path, s.index)
-	s.publishUpdate(fmt.Sprintf("Indexed %d entries", len(s.passwords)))
+	if err := filepath.Walk(s.path, s.index); err != nil {
+		return
+	}
+	s.publishUpdate(fmt.Sprintf("Indexed %d pass entries", len(s.passwords)))
 }
 
 func (s *Storage) index(path string, info os.FileInfo, err error) error {
@@ -86,7 +95,7 @@ func (s *Storage) index(path string, info os.FileInfo, err error) error {
 		if len(name) > MaxLen {
 			name = "..." + name[len(name)-MaxLen:]
 		}
-		s.passwords = append(s.passwords, passcard.Password{Name: name, Path: path})
+		s.passwords = append(s.passwords, passcard.StoredItem{Name: name, Path: path})
 	}
 	return nil
 }

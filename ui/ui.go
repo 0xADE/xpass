@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"0xADE/xpass/config"
 	"0xADE/xpass/passcard"
 	"0xADE/xpass/storage"
 
@@ -27,18 +28,16 @@ import (
 )
 
 type UI struct {
-	storage *storage.Storage
-	theme   *material.Theme
-	window  *app.Window
-
-	searchEditor widget.Editor
-	list         widget.List
-
+	storage       *storage.Storage
+	config        *config.Config
+	theme         *material.Theme
+	window        *app.Window
+	searchEditor  widget.Editor
+	list          widget.List
 	query         string
-	passwords     []passcard.Password
-	selectedIndex int
+	filtered      []passcard.StoredItem
+	selectedIdx   int
 	status        string
-
 	countingDown  bool
 	countdown     float32
 	countdownDone chan bool
@@ -46,9 +45,10 @@ type UI struct {
 	initialized bool
 }
 
-func New(store *storage.Storage) *UI {
+func New(store *storage.Storage, cfg *config.Config) *UI {
 	ui := &UI{
 		storage:       store,
+		config:        cfg,
 		countdownDone: make(chan bool, 1),
 		list: widget.List{
 			List: layout.List{Axis: layout.Vertical},
@@ -71,19 +71,19 @@ func New(store *storage.Storage) *UI {
 }
 
 func (ui *UI) updateQuery() {
-	ui.passwords = ui.storage.Query(ui.query)
-	if ui.selectedIndex >= len(ui.passwords) {
-		ui.selectedIndex = 0
+	ui.filtered = ui.storage.Query(ui.query)
+	if ui.selectedIdx >= len(ui.filtered) {
+		ui.selectedIdx = 0
 	}
 }
 
 func (ui *UI) copyToClipboard() {
-	if ui.selectedIndex >= len(ui.passwords) {
+	if ui.selectedIdx >= len(ui.filtered) {
 		ui.status = "No password selected"
 		return
 	}
 
-	pw := ui.passwords[ui.selectedIndex]
+	pw := ui.filtered[ui.selectedIdx]
 	pass := pw.Password()
 	if err := clipboard.WriteAll(pass); err != nil {
 		ui.status = fmt.Sprintf("Failed to copy: %v", err)
@@ -100,19 +100,19 @@ func (ui *UI) clearClipboard() {
 	}
 	ui.countingDown = true
 
-	tick := 10 * time.Millisecond
+	tick := 200 * time.Millisecond
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 
-	remaining := 15.0
+	remaining := float64(ui.config.PasswordStoreClipSeconds)
 	for {
 		select {
 		case <-ui.countdownDone:
 			ui.countingDown = false
 			return
 		case <-ticker.C:
-			ui.countdown = float32(remaining / 15.0)
-			ui.status = fmt.Sprintf("Will clear in %.0f seconds", remaining)
+			ui.countdown = float32(remaining / float64(ui.config.PasswordStoreClipSeconds))
+			ui.status = fmt.Sprintf("Will clear %s in %.0f seconds", ui.storage.NameByIdx(ui.selectedIdx), remaining)
 			if ui.window != nil {
 				ui.window.Invalidate()
 			}
@@ -167,7 +167,20 @@ func (ui *UI) loop() error {
 			area := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 			event.Op(gtx.Ops, ui.window)
 
-			// Check for global keyboard shortcuts
+			// Handle lobal keyboard shortcuts ============================
+			//
+			// ,---,---,---,---,---,---,---,---,---,---,---,---,---,-------,
+			// |1/2| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 0 | + | ' | <-    |
+			// |---'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-----|
+			// | ->| | Q | W | E | R | T | Y | U | I | O | P | ] | ^ |     |
+			// |-----',--',--',--',--',--',--',--',--',--',--',--',--'|    |
+			// | Caps | A | S | D | F | G | H | J | K | L | \ | [ | * |    |
+			// |----,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'-,-'---'----|
+			// |    | < | Z | X | C | V | B | N | M | , | . | - |          |
+			// |----'-,-',--'--,'---'---'---'---'---'---'-,-'---',--,------|
+			// | ctrl |  | alt |                          |altgr |  | ctrl |
+			// '------'  '-----'--------------------------'------'  '------'
+			//
 			for {
 				ev, ok := gtx.Event(
 					key.Filter{Name: key.NameEscape},
@@ -182,22 +195,23 @@ func (ui *UI) loop() error {
 					case key.NameEscape:
 						os.Exit(0)
 					case key.NameUpArrow:
-						if ui.selectedIndex > 0 {
-							ui.selectedIndex--
-							if ui.list.List.Position.First > ui.selectedIndex {
-								ui.list.List.Position.First = ui.selectedIndex
+						if ui.selectedIdx > 0 {
+							ui.selectedIdx--
+							if ui.list.Position.First > ui.selectedIdx {
+								ui.list.Position.First = ui.selectedIdx
 							}
 						}
 					case key.NameDownArrow:
-						if ui.selectedIndex < len(ui.passwords)-1 {
-							ui.selectedIndex++
-							if ui.list.List.Position.Count > 0 && ui.list.List.Position.First+ui.list.List.Position.Count <= ui.selectedIndex {
-								ui.list.List.Position.First = ui.selectedIndex - ui.list.List.Position.Count + 1
+						if ui.selectedIdx < len(ui.filtered)-1 {
+							ui.selectedIdx++
+							if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
+								ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
 							}
 						}
 					}
 				}
 			}
+			// ===== END OF KEYBOARD HANDLING =====
 
 			for {
 				ev, ok := ui.searchEditor.Update(gtx)
@@ -251,13 +265,13 @@ func (ui *UI) layoutLeftPane(gtx layout.Context) layout.Dimensions {
 }
 
 func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
-	return material.List(ui.theme, &ui.list).Layout(gtx, len(ui.passwords), func(gtx layout.Context, index int) layout.Dimensions {
-		isSelected := index == ui.selectedIndex
+	return material.List(ui.theme, &ui.list).Layout(gtx, len(ui.filtered), func(gtx layout.Context, index int) layout.Dimensions {
+		isSelected := index == ui.selectedIdx
 
 		// First render the content to get its height
 		macro := op.Record(gtx.Ops)
 		dims := layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Body1(ui.theme, ui.passwords[index].Name)
+			label := material.Body1(ui.theme, ui.filtered[index].Name)
 			label.TextSize = unit.Sp(18)
 			return label.Layout(gtx)
 		})
@@ -299,8 +313,8 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if ui.selectedIndex < len(ui.passwords) {
-							name := ui.passwords[ui.selectedIndex].Name
+						if ui.selectedIdx < len(ui.filtered) {
+							name := ui.filtered[ui.selectedIdx].Name
 							label := material.H6(ui.theme, name)
 							label.Color = color.NRGBA{R: 238, G: 238, B: 238, A: 255}
 							label.Alignment = text.Middle
@@ -310,8 +324,8 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						if ui.selectedIndex < len(ui.passwords) {
-							metadata := ui.passwords[ui.selectedIndex].Metadata()
+						if ui.selectedIdx < len(ui.filtered) {
+							metadata := ui.filtered[ui.selectedIdx].Metadata()
 							if metadata == "" {
 								metadata = "Press Enter to decrypt"
 							}
