@@ -43,8 +43,15 @@ type UI struct {
 	countdown     float32
 	countdownDone chan bool
 
-	initialized   bool
-	metadataState richtext.InteractiveText
+	initialized          bool
+	metadataState        richtext.InteractiveText
+	metadataEditor       widget.Editor
+	showRichText         bool
+	metadataAreaClick    widget.Clickable
+	toggleButton         widget.Clickable
+	lastMetadataText     string
+	lastMetadataItemIdx  int
+	lastMetadataRichMode bool
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -55,10 +62,15 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		list: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
+		showRichText:        true,
+		lastMetadataItemIdx: -1, // Force initial update
 	}
 
 	ui.searchEditor.SingleLine = true
 	ui.searchEditor.Submit = true
+
+	ui.metadataEditor.ReadOnly = true
+	ui.metadataEditor.SingleLine = false
 
 	store.Subscribe(func(status string) {
 		ui.status = status
@@ -188,6 +200,7 @@ func (ui *UI) loop() error {
 					key.Filter{Name: key.NameEscape},
 					key.Filter{Name: key.NameUpArrow},
 					key.Filter{Name: key.NameDownArrow},
+					key.Filter{Name: "T"},
 				)
 				if !ok {
 					break
@@ -209,6 +222,10 @@ func (ui *UI) loop() error {
 							if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
 								ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
 							}
+						}
+					case "T":
+						if kev.Modifiers.Contain(key.ModCtrl) {
+							ui.showRichText = !ui.showRichText
 						}
 					}
 				}
@@ -294,6 +311,27 @@ func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
 	})
 }
 
+func (ui *UI) layoutToggleButton(gtx layout.Context) layout.Dimensions {
+	if ui.toggleButton.Clicked(gtx) {
+		ui.showRichText = !ui.showRichText
+	}
+
+	buttonText := "📝 Show Plain Text"
+	if !ui.showRichText {
+		buttonText = "🎨 Show Rich Text"
+	}
+
+	btn := material.Button(ui.theme, &ui.toggleButton, buttonText)
+	btn.TextSize = unit.Sp(14)
+	btn.Background = color.NRGBA{R: 80, G: 80, B: 80, A: 255}
+	btn.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+
+	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Max.X = gtx.Dp(unit.Dp(180))
+		return btn.Layout(gtx)
+	})
+}
+
 func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 	gtx.Constraints.Max.X = gtx.Dp(unit.Dp(600))
 	gtx.Constraints.Min.X = gtx.Dp(unit.Dp(300))
@@ -324,7 +362,10 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 						}
 						return layout.Dimensions{}
 					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return ui.layoutToggleButton(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						if ui.selectedIdx < len(ui.filtered) {
 							metadata := ui.filtered[ui.selectedIdx].Metadata()
@@ -332,20 +373,54 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 								metadata = "Press Enter to decrypt"
 							}
 
-							// Format metadata with key-value pairs and markdown support
-							spans := FormatMetadata(metadata, font.Typeface(""))
-							if len(spans) == 0 {
-								// Fallback to simple text if no spans generated
-								label := material.Body2(ui.theme, metadata)
-								label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-								label.Font.Typeface = font.Typeface("monospace")
-								label.TextSize = unit.Sp(20)
-								return label.Layout(gtx)
-							}
+							// Handle clicks in rich text mode
+							if ui.showRichText {
+								// Mark that we're in rich text mode and track metadata
+								if ui.selectedIdx != ui.lastMetadataItemIdx {
+									ui.lastMetadataItemIdx = ui.selectedIdx
+									ui.lastMetadataText = metadata
+								}
+								ui.lastMetadataRichMode = true
 
-							// Render using richtext
-							textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
-							return textStyle.Layout(gtx)
+								// Check for click to switch to plain text
+								if ui.metadataAreaClick.Clicked(gtx) {
+									ui.showRichText = false
+								}
+
+								return ui.metadataAreaClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									// Rich text mode with formatting
+									spans := FormatMetadata(metadata, font.Typeface(""))
+									if len(spans) == 0 {
+										// Fallback to simple text if no spans generated
+										label := material.Body2(ui.theme, metadata)
+										label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+										label.Font.Typeface = font.Typeface("monospace")
+										label.TextSize = unit.Sp(20)
+										return label.Layout(gtx)
+									}
+
+									// Render using richtext
+									textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
+									return textStyle.Layout(gtx)
+								})
+							} else {
+								// Plain text mode - selectable with mouse
+								// Only update text if metadata changed or mode switched
+								if metadata != ui.lastMetadataText ||
+									ui.selectedIdx != ui.lastMetadataItemIdx ||
+									ui.lastMetadataRichMode {
+									ui.metadataEditor.SetText(metadata)
+									ui.lastMetadataText = metadata
+									ui.lastMetadataItemIdx = ui.selectedIdx
+									ui.lastMetadataRichMode = false
+								}
+
+								editor := material.Editor(ui.theme, &ui.metadataEditor, "")
+								editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+								editor.Font.Typeface = font.Typeface("monospace")
+								editor.TextSize = unit.Sp(20)
+								return editor.Layout(gtx)
+							}
 						}
 						return layout.Dimensions{}
 					}),

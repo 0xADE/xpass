@@ -1,11 +1,11 @@
 .PHONY: build
 build:
 	mkdir -p build
-	go build -ldflags "-s" -o build/xpass ./cmd/xpass
+	go build -buildvcs=false -ldflags "-s" -o build/xpass ./cmd/xpass
 
 .PHONY: run
-run: build
-	./build/xpass
+run:
+	go run ./...
 
 .PHONY: clean
 clean:
@@ -18,3 +18,7 @@ lint:
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+.PHONY: install
+install: build
+	install ./build/xpass /usr/local/bin
