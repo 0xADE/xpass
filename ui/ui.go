@@ -254,24 +254,27 @@ func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
 	return material.List(ui.theme, &ui.list).Layout(gtx, len(ui.passwords), func(gtx layout.Context, index int) layout.Dimensions {
 		isSelected := index == ui.selectedIndex
 
-		return layout.Stack{}.Layout(gtx,
-			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-				if isSelected {
-					selectionColor := color.NRGBA{R: 100, G: 150, B: 200, A: 100}
-					defer clip.Rect{Max: gtx.Constraints.Min}.Push(gtx.Ops).Pop()
-					paint.ColorOp{Color: selectionColor}.Add(gtx.Ops)
-					paint.PaintOp{}.Add(gtx.Ops)
-				}
-				return layout.Dimensions{Size: gtx.Constraints.Min}
-			}),
-			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-				return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					label := material.Body1(ui.theme, ui.passwords[index].Name)
-					label.TextSize = unit.Sp(18)
-					return label.Layout(gtx)
-				})
-			}),
-		)
+		// First render the content to get its height
+		macro := op.Record(gtx.Ops)
+		dims := layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			label := material.Body1(ui.theme, ui.passwords[index].Name)
+			label.TextSize = unit.Sp(18)
+			return label.Layout(gtx)
+		})
+		call := macro.Stop()
+
+		// Draw background if selected, using full width
+		if isSelected {
+			selectionColor := color.NRGBA{R: 100, G: 150, B: 200, A: 100}
+			bgRect := image.Pt(gtx.Constraints.Max.X, dims.Size.Y)
+			defer clip.Rect{Max: bgRect}.Push(gtx.Ops).Pop()
+			paint.ColorOp{Color: selectionColor}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+		}
+
+		// Draw the content on top
+		call.Add(gtx.Ops)
+		return dims
 	})
 }
 
