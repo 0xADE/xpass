@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	gioui.org v0.9.0
 	github.com/atotto/clipboard v0.1.4
+	github.com/energye/systray v1.0.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/rjeczalik/notify v0.9.3
 )
@@ -82,6 +83,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/go-xmlfmt/xmlfmt v1.1.3 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
+	github.com/godbus/dbus/v5 v5.0.4 // indirect
 	github.com/godoc-lint/godoc-lint v0.10.0 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
@@ -184,6 +186,7 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/subosito/gotenv v1.4.1 // indirect
 	github.com/tetafro/godot v1.5.4 // indirect
+	github.com/tevino/abool v0.0.0-20220530134649-2bfc934cb23c // indirect
 	github.com/timakin/bodyclose v0.0.0-20241222091800-1db5c5ca4d67 // indirect
 	github.com/timonwong/loggercheck v0.11.0 // indirect
 	github.com/tomarrell/wrapcheck/v2 v2.11.0 // indirect

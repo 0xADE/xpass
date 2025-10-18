@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"os"
+	"sync"
 	"time"
 
 	"0xADE/xpass/config"
@@ -15,6 +16,7 @@ import (
 	"gioui.org/font"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/system"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -25,6 +27,7 @@ import (
 	"gioui.org/widget/material"
 
 	"github.com/atotto/clipboard"
+	"github.com/energye/systray"
 )
 
 type UI struct {
@@ -41,8 +44,12 @@ type UI struct {
 	countingDown  bool
 	countdown     float32
 	countdownDone chan bool
+	initialized   bool
+	showWindow    chan struct{}
+	quitApp       chan struct{}
 
-	initialized bool
+	wl            sync.Mutex
+	windowVisible bool
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -50,6 +57,8 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		storage:       store,
 		config:        cfg,
 		countdownDone: make(chan bool, 1),
+		showWindow:    make(chan struct{}, 5),
+		quitApp:       make(chan struct{}, 5),
 		list: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
@@ -131,18 +140,91 @@ func (ui *UI) clearClipboard() {
 }
 
 func (ui *UI) Run() error {
-	ui.window = new(app.Window)
-	ui.window.Option(app.Title("xpass"))
-	ui.window.Option(app.Size(unit.Dp(1080), unit.Dp(920)))
-
+	// Start systray in a goroutine
 	go func() {
-		if err := ui.loop(); err != nil {
-			panic(err)
+		systray.Run(ui.onTrayReady, ui.onTrayExit)
+	}()
+
+	// Handle window show/hide logic
+	go func() {
+		for {
+			select {
+			case <-ui.showWindow:
+				if ui.windowVisible {
+					ui.hideWindow()
+				} else {
+					ui.createWindow()
+				}
+			case <-ui.quitApp:
+				systray.Quit()
+				ui.window.Perform(system.ActionClose)
+				os.Exit(0)
+			}
 		}
 	}()
 
+	// Create initial window
+	go ui.createWindow()
 	app.Main()
 	return nil
+}
+
+func (ui *UI) createWindow() {
+	ui.wl.Lock()
+	ui.windowVisible = true
+	ui.window = new(app.Window)
+	ui.window.Option(app.Title("xpass"))
+	ui.window.Option(app.Size(unit.Dp(1080), unit.Dp(920)))
+	fmt.Println("showed")
+	ui.wl.Unlock()
+	if err := ui.loop(); err != nil {
+		fmt.Println("fatal window error")
+	}
+}
+
+func (ui *UI) hideWindow() {
+	ui.wl.Lock()
+	if !ui.windowVisible {
+		ui.wl.Unlock()
+		return
+	}
+	ui.windowVisible = false
+	fmt.Println("hidden")
+	ui.wl.Unlock()
+	ui.window.Perform(system.ActionClose)
+}
+
+func (ui *UI) onTrayReady() {
+	systray.SetIcon(IconData)
+	systray.SetTitle("xpass")
+	systray.SetTooltip("xpass is a password manager")
+
+	// Add menu items
+	mShow := systray.AddMenuItem("Show/Hide", "Show or hide the application window")
+	systray.AddSeparator()
+	mQuit := systray.AddMenuItem("Quit", "Quit the application")
+
+	// Handle show menu clicks
+	mShow.Click(func() {
+		ui.showWindow <- struct{}{}
+	})
+
+	// Handle quit menu clicks
+	mQuit.Click(func() {
+		ui.quitApp <- struct{}{}
+	})
+
+	// Handle tray icon click to show window
+	systray.SetOnClick(func(menu systray.IMenu) {
+		select {
+		case ui.showWindow <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func (ui *UI) onTrayExit() {
+	// Cleanup
 }
 
 func (ui *UI) loop() error {
@@ -153,6 +235,10 @@ func (ui *UI) loop() error {
 	for {
 		switch e := ui.window.Event().(type) {
 		case app.DestroyEvent:
+			// Window closed, mark as hidden
+			ui.wl.Lock()
+			ui.windowVisible = false
+			ui.wl.Unlock()
 			return e.Err
 
 		case app.FrameEvent:
@@ -193,7 +279,9 @@ func (ui *UI) loop() error {
 				if kev, ok := ev.(key.Event); ok && kev.State == key.Press {
 					switch kev.Name {
 					case key.NameEscape:
-						os.Exit(0)
+						// TODO Minimize to tray instead of exit, make it customizable
+						ui.hideWindow()
+						return nil
 					case key.NameUpArrow:
 						if ui.selectedIdx > 0 {
 							ui.selectedIdx--
