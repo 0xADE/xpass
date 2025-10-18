@@ -4,9 +4,11 @@ go 1.25.1
 
 require (
 	gioui.org v0.9.0
+	gioui.org/x v0.9.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/rjeczalik/notify v0.9.3
+	github.com/yuin/goldmark v1.4.13
 )
 
 require (
@@ -205,6 +207,7 @@ require (
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
+	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20250911091902-df9299821621 // indirect
 	golang.org/x/image v0.26.0 // indirect

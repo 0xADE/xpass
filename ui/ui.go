@@ -23,6 +23,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"gioui.org/x/richtext"
 
 	"github.com/atotto/clipboard"
 )
@@ -42,7 +43,8 @@ type UI struct {
 	countdown     float32
 	countdownDone chan bool
 
-	initialized bool
+	initialized   bool
+	metadataState richtext.InteractiveText
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -329,11 +331,21 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 							if metadata == "" {
 								metadata = "Press Enter to decrypt"
 							}
-							label := material.Body2(ui.theme, metadata)
-							label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-							label.Font.Typeface = font.Typeface("monospace")
-							label.TextSize = unit.Sp(20)
-							return label.Layout(gtx)
+
+							// Format metadata with key-value pairs and markdown support
+							spans := FormatMetadata(metadata, font.Typeface(""))
+							if len(spans) == 0 {
+								// Fallback to simple text if no spans generated
+								label := material.Body2(ui.theme, metadata)
+								label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+								label.Font.Typeface = font.Typeface("monospace")
+								label.TextSize = unit.Sp(20)
+								return label.Layout(gtx)
+							}
+
+							// Render using richtext
+							textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
+							return textStyle.Layout(gtx)
 						}
 						return layout.Dimensions{}
 					}),
