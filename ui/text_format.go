@@ -33,6 +33,60 @@ var (
 // Key-value pattern: word(s) without spaces or colons, followed by colon
 var keyValuePattern = regexp.MustCompile(`^([^\s:]+):\s*(.*)$`)
 
+// KeyValuePair represents a single key-value field
+type KeyValuePair struct {
+	Key   string
+	Value string
+}
+
+// ExtractKeyValuePairs parses text and separates key:value pairs from markdown content.
+// Returns the array of key-value pairs and remaining text (markdown/other content).
+func ExtractKeyValuePairs(text string) ([]KeyValuePair, string) {
+	if text == "" {
+		return nil, ""
+	}
+
+	lines := strings.Split(text, "\n")
+	var pairs []KeyValuePair
+	var remainingLines []string
+	inKeyValueSection := true
+
+	for _, line := range lines {
+		if !inKeyValueSection {
+			remainingLines = append(remainingLines, line)
+			continue
+		}
+
+		// Check for key:value pattern
+		if matches := keyValuePattern.FindStringSubmatch(line); matches != nil {
+			pairs = append(pairs, KeyValuePair{
+				Key:   matches[1],
+				Value: matches[2],
+			})
+			continue
+		}
+
+		// Check for markdown start (heading)
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			inKeyValueSection = false
+			remainingLines = append(remainingLines, line)
+			continue
+		}
+
+		// Empty line - stay in key-value section, don't add to pairs
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		// Non-key-value line - switch to markdown mode
+		inKeyValueSection = false
+		remainingLines = append(remainingLines, line)
+	}
+
+	remainingText := strings.Join(remainingLines, "\n")
+	return pairs, strings.TrimSpace(remainingText)
+}
+
 // FormatMetadata parses text and returns formatted spans for richtext rendering.
 // It handles key:value pairs (with bold keys and prefix) and markdown sections.
 func FormatMetadata(text string, shaper font.Typeface) []richtext.SpanStyle {

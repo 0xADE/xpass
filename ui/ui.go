@@ -28,6 +28,12 @@ import (
 	"github.com/atotto/clipboard"
 )
 
+type fieldWidget struct {
+	editor         widget.Editor
+	clickable      widget.Clickable
+	labelClickable widget.Clickable
+}
+
 type UI struct {
 	storage       *storage.Storage
 	config        *config.Config
@@ -52,6 +58,11 @@ type UI struct {
 	lastMetadataText     string
 	lastMetadataItemIdx  int
 	lastMetadataRichMode bool
+
+	// Rich mode field widgets
+	fieldWidgets map[string]*fieldWidget
+	kvPairs      []KeyValuePair
+	markdownText string
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -64,6 +75,7 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		},
 		showRichText:        true,
 		lastMetadataItemIdx: -1, // Force initial update
+		fieldWidgets:        make(map[string]*fieldWidget),
 	}
 
 	ui.searchEditor.SingleLine = true
@@ -100,6 +112,16 @@ func (ui *UI) copyToClipboard() {
 	pw := ui.filtered[ui.selectedIdx]
 	pass := pw.Password()
 	if err := clipboard.WriteAll(pass); err != nil {
+		ui.status = fmt.Sprintf("Failed to copy: %v", err)
+		return
+	}
+
+	ui.status = "Copied to clipboard"
+	go ui.clearClipboard()
+}
+
+func (ui *UI) copyFieldToClipboard(value string) {
+	if err := clipboard.WriteAll(value); err != nil {
 		ui.status = fmt.Sprintf("Failed to copy: %v", err)
 		return
 	}
@@ -376,33 +398,58 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 							// Handle clicks in rich text mode
 							if ui.showRichText {
 								// Mark that we're in rich text mode and track metadata
-								if ui.selectedIdx != ui.lastMetadataItemIdx {
+								if ui.selectedIdx != ui.lastMetadataItemIdx || metadata != ui.lastMetadataText {
 									ui.lastMetadataItemIdx = ui.selectedIdx
 									ui.lastMetadataText = metadata
+									// Extract key-value pairs and markdown text
+									ui.kvPairs, ui.markdownText = ExtractKeyValuePairs(metadata)
 								}
 								ui.lastMetadataRichMode = true
 
-								// Check for click to switch to plain text
-								if ui.metadataAreaClick.Clicked(gtx) {
-									ui.showRichText = false
+								// Rich text mode with input widgets for key-value pairs
+								children := []layout.FlexChild{}
+
+								// Add key-value fields (not clickable for mode switching)
+								for i, pair := range ui.kvPairs {
+									children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return ui.layoutKeyValueField(gtx, pair)
+									}))
+									if i < len(ui.kvPairs)-1 {
+										children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+									}
 								}
 
-								return ui.metadataAreaClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									// Rich text mode with formatting
-									spans := FormatMetadata(metadata, font.Typeface(""))
-									if len(spans) == 0 {
-										// Fallback to simple text if no spans generated
-										label := material.Body2(ui.theme, metadata)
-										label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-										label.Font.Typeface = font.Typeface("monospace")
-										label.TextSize = unit.Sp(20)
-										return label.Layout(gtx)
-									}
+								// Add spacing if both sections exist
+								if len(ui.kvPairs) > 0 && ui.markdownText != "" {
+									children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout))
+								}
 
-									// Render using richtext
-									textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
-									return textStyle.Layout(gtx)
-								})
+								// Add markdown section (clickable for mode switching)
+								if ui.markdownText != "" {
+									children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										// Check for click to switch to plain text
+										if ui.metadataAreaClick.Clicked(gtx) {
+											ui.showRichText = false
+										}
+
+										return ui.metadataAreaClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											// Render markdown using richtext
+											spans := FormatMetadata(ui.markdownText, font.Typeface(""))
+											if len(spans) == 0 {
+												// Fallback to simple text if no spans generated
+												label := material.Body2(ui.theme, ui.markdownText)
+												label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+												label.Font.Typeface = font.Typeface("monospace")
+												label.TextSize = unit.Sp(20)
+												return label.Layout(gtx)
+											}
+											textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
+											return textStyle.Layout(gtx)
+										})
+									}))
+								}
+
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 							} else {
 								// Plain text mode - selectable with mouse
 								// Only update text if metadata changed or mode switched
@@ -439,4 +486,50 @@ func (ui *UI) layoutCountdown(gtx layout.Context) layout.Dimensions {
 	paint.PaintOp{}.Add(gtx.Ops)
 
 	return layout.Dimensions{Size: gtx.Constraints.Max}
+}
+
+func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.Dimensions {
+	// Get or create field widget for this key
+	fw, exists := ui.fieldWidgets[pair.Key]
+	if !exists {
+		fw = &fieldWidget{}
+		fw.editor.ReadOnly = true
+		fw.editor.SingleLine = true
+		ui.fieldWidgets[pair.Key] = fw
+	}
+
+	// Update editor text if value changed
+	if fw.editor.Text() != pair.Value {
+		fw.editor.SetText(pair.Value)
+	}
+
+	// Handle clicks on label
+	if fw.labelClickable.Clicked(gtx) {
+		ui.copyFieldToClipboard(pair.Value)
+	}
+
+	// Handle clicks on input widget
+	if fw.clickable.Clicked(gtx) {
+		ui.copyFieldToClipboard(pair.Value)
+	}
+
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return fw.labelClickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				label := material.Body1(ui.theme, pair.Key+":")
+				label.Color = color.NRGBA{R: 238, G: 238, B: 238, A: 255}
+				label.TextSize = unit.Sp(18)
+				label.Font.Weight = font.Bold
+				return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, label.Layout)
+			})
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return fw.clickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				editor := material.Editor(ui.theme, &fw.editor, "")
+				editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+				editor.TextSize = unit.Sp(18)
+				return editor.Layout(gtx)
+			})
+		}),
+	)
 }
