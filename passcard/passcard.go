@@ -11,12 +11,24 @@ import (
 	"strings"
 )
 
+type CacheInterface interface {
+	GetCached(path string) (string, bool)
+	SetCached(path, value string)
+}
+
 type StoredItem struct {
-	Name string
-	Path string
+	Name    string
+	Path    string
+	Storage CacheInterface
 }
 
 func (p *StoredItem) decrypt() (string, error) {
+	if p.Storage != nil {
+		if cached, ok := p.Storage.GetCached(p.Path); ok {
+			return cached, nil
+		}
+	}
+
 	cmd := exec.Command("gpg", "--decrypt", "--quiet", "--batch", p.Path)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -26,7 +38,12 @@ func (p *StoredItem) decrypt() (string, error) {
 		return "", err
 	}
 
-	return out.String(), nil
+	result := out.String()
+	if p.Storage != nil {
+		p.Storage.SetCached(p.Path, result)
+	}
+
+	return result, nil
 }
 
 func (p *StoredItem) Raw() string {

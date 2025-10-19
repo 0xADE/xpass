@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"0xADE/xpass/passcard"
 
@@ -23,10 +24,15 @@ type Storage struct {
 	key         string
 	passwords   []passcard.StoredItem
 	subscribers []Subscriber
+	cache       map[string]string
+	cacheMutex  sync.RWMutex
 }
 
 func Init(basePath, key string) (*Storage, error) {
-	s := &Storage{key: key}
+	s := &Storage{
+		key:   key,
+		cache: make(map[string]string),
+	}
 	if err := s.findPasswordStore(basePath); err != nil {
 		return nil, err
 	}
@@ -78,11 +84,51 @@ func (s *Storage) publishUpdate(status string) {
 	}
 }
 
+func (s *Storage) GetCached(path string) (string, bool) {
+	s.cacheMutex.RLock()
+	defer s.cacheMutex.RUnlock()
+	cached, ok := s.cache[path]
+	return cached, ok
+}
+
+func (s *Storage) SetCached(path, value string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+	s.cache[path] = value
+}
+
+func (s *Storage) invalidateCache(path string) {
+	if strings.HasSuffix(path, ".gpg") {
+		s.cacheMutex.Lock()
+		delete(s.cache, path)
+		s.cacheMutex.Unlock()
+	}
+}
+
 func (s *Storage) IndexAll() {
+	oldPaths := make(map[string]bool)
+	for _, p := range s.passwords {
+		oldPaths[p.Path] = true
+	}
+
 	s.passwords = nil
 	if err := filepath.Walk(s.path, s.index); err != nil {
 		return
 	}
+
+	newPaths := make(map[string]bool)
+	for _, p := range s.passwords {
+		newPaths[p.Path] = true
+	}
+
+	s.cacheMutex.Lock()
+	for path := range s.cache {
+		if !newPaths[path] {
+			delete(s.cache, path)
+		}
+	}
+	s.cacheMutex.Unlock()
+
 	s.publishUpdate(fmt.Sprintf("Indexed %d pass entries", len(s.passwords)))
 }
 
@@ -95,7 +141,11 @@ func (s *Storage) index(path string, info os.FileInfo, err error) error {
 		if len(name) > MaxLen {
 			name = "..." + name[len(name)-MaxLen:]
 		}
-		s.passwords = append(s.passwords, passcard.StoredItem{Name: name, Path: path})
+		s.passwords = append(s.passwords, passcard.StoredItem{
+			Name:    name,
+			Path:    path,
+			Storage: s,
+		})
 	}
 	return nil
 }
@@ -108,7 +158,8 @@ func (s *Storage) watch() {
 	}
 
 	go func() {
-		for range c {
+		for event := range c {
+			s.invalidateCache(event.Path())
 			s.IndexAll()
 		}
 	}()
