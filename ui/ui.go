@@ -70,6 +70,11 @@ type UI struct {
 	queryInput   chan string
 	queryResults chan []passcard.StoredItem
 	stopFilter   chan struct{}
+
+	// Key repeat handling
+	keyRepeatActive bool
+	keyRepeatName   key.Name
+	keyRepeatStart  time.Time
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -147,6 +152,24 @@ func (ui *UI) updateQuery() {
 	ui.filtered = ui.storage.Query(ui.query)
 	if ui.selectedIdx >= len(ui.filtered) {
 		ui.selectedIdx = 0
+	}
+}
+
+func (ui *UI) moveSelectionUp() {
+	if ui.selectedIdx > 0 {
+		ui.selectedIdx--
+		if ui.list.Position.First > ui.selectedIdx {
+			ui.list.Position.First = ui.selectedIdx
+		}
+	}
+}
+
+func (ui *UI) moveSelectionDown() {
+	if ui.selectedIdx < len(ui.filtered)-1 {
+		ui.selectedIdx++
+		if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
+			ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
+		}
 	}
 }
 
@@ -311,29 +334,61 @@ func (ui *UI) loop() error {
 				if !ok {
 					break
 				}
-				if kev, ok := ev.(key.Event); ok && kev.State == key.Press {
-					switch kev.Name {
-					case key.NameEscape:
-						os.Exit(0)
-					case key.NameUpArrow:
-						if ui.selectedIdx > 0 {
-							ui.selectedIdx--
-							if ui.list.Position.First > ui.selectedIdx {
-								ui.list.Position.First = ui.selectedIdx
+				if kev, ok := ev.(key.Event); ok {
+					if kev.State == key.Press {
+						switch kev.Name {
+						case key.NameEscape:
+							os.Exit(0)
+						case key.NameUpArrow:
+							ui.moveSelectionUp()
+							ui.keyRepeatActive = true
+							ui.keyRepeatName = key.NameUpArrow
+							ui.keyRepeatStart = time.Now()
+						case key.NameDownArrow:
+							ui.moveSelectionDown()
+							ui.keyRepeatActive = true
+							ui.keyRepeatName = key.NameDownArrow
+							ui.keyRepeatStart = time.Now()
+						case "T":
+							if kev.Modifiers.Contain(key.ModCtrl) {
+								ui.showRichText = !ui.showRichText
 							}
 						}
-					case key.NameDownArrow:
-						if ui.selectedIdx < len(ui.filtered)-1 {
-							ui.selectedIdx++
-							if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
-								ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
-							}
-						}
-					case "T":
-						if kev.Modifiers.Contain(key.ModCtrl) {
-							ui.showRichText = !ui.showRichText
+					} else if kev.State == key.Release {
+						// Stop key repeat when key is released
+						if ui.keyRepeatActive && kev.Name == ui.keyRepeatName {
+							ui.keyRepeatActive = false
 						}
 					}
+				}
+			}
+
+			// Handle key repeat for arrow keys
+			if ui.keyRepeatActive {
+				elapsed := time.Since(ui.keyRepeatStart)
+				initialDelay := 200 * time.Millisecond
+				repeatInterval := 30 * time.Millisecond
+
+				if elapsed > initialDelay {
+					repeatCount := int((elapsed - initialDelay) / repeatInterval)
+					lastRepeatTime := initialDelay + time.Duration(repeatCount)*repeatInterval
+					nextRepeatTime := lastRepeatTime + repeatInterval
+
+					if elapsed >= nextRepeatTime {
+						switch ui.keyRepeatName {
+						case key.NameUpArrow:
+							ui.moveSelectionUp()
+						case key.NameDownArrow:
+							ui.moveSelectionDown()
+						}
+						ui.keyRepeatStart = ui.keyRepeatStart.Add(nextRepeatTime)
+					}
+
+					// Schedule next frame
+					gtx.Execute(op.InvalidateCmd{})
+				} else {
+					// Wait for initial delay
+					gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(initialDelay - elapsed)})
 				}
 			}
 			// ===== END OF KEYBOARD HANDLING =====
