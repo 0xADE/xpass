@@ -86,3 +86,11 @@ func (p *StoredItem) Password() string {
 
 	return strings.TrimSpace(lines[0])
 }
+
+func (p *StoredItem) FullContent() string {
+	decrypted, err := p.decrypt()
+	if err != nil {
+		return ""
+	}
+	return decrypted
+}

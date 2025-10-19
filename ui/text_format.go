@@ -39,6 +39,14 @@ type KeyValuePair struct {
 	Value string
 }
 
+// MaskPassword returns a masked representation of a password
+func MaskPassword(password string) string {
+	if password == "" {
+		return "<empty>"
+	}
+	return "***<has value>***"
+}
+
 // ExtractKeyValuePairs parses text and separates key:value pairs from markdown content.
 // Returns the array of key-value pairs and remaining text (markdown/other content).
 func ExtractKeyValuePairs(text string) ([]KeyValuePair, string) {
