@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"os"
+	"sync"
 	"time"
 
 	"0xADE/xpass/config"
@@ -48,6 +49,7 @@ type UI struct {
 	countingDown  bool
 	countdown     float32
 	countdownDone chan bool
+	statusMutex   sync.RWMutex
 
 	initialized          bool
 	metadataState        richtext.InteractiveText
@@ -93,7 +95,9 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	ui.metadataEditor.SingleLine = false
 
 	store.Subscribe(func(status string) {
+		ui.statusMutex.Lock()
 		ui.status = status
+		ui.statusMutex.Unlock()
 		ui.updateQuery()
 		if ui.window != nil {
 			ui.window.Invalidate()
@@ -148,42 +152,55 @@ func (ui *UI) updateQuery() {
 
 func (ui *UI) copyToClipboard() {
 	if ui.selectedIdx >= len(ui.filtered) {
+		ui.statusMutex.Lock()
 		ui.status = "No password selected"
+		ui.statusMutex.Unlock()
 		return
 	}
 
 	pw := ui.filtered[ui.selectedIdx]
 	pass := pw.Password()
 	if err := clipboard.WriteAll(pass); err != nil {
+		ui.statusMutex.Lock()
 		ui.status = fmt.Sprintf("Failed to copy: %v", err)
+		ui.statusMutex.Unlock()
 		return
 	}
 
+	ui.statusMutex.Lock()
 	ui.status = "Copied to clipboard"
+	ui.statusMutex.Unlock()
 	go ui.clearClipboard()
 }
 
 func (ui *UI) copyFieldToClipboard(value string) {
 	if err := clipboard.WriteAll(value); err != nil {
+		ui.statusMutex.Lock()
 		ui.status = fmt.Sprintf("Failed to copy: %v", err)
+		ui.statusMutex.Unlock()
 		return
 	}
 
+	ui.statusMutex.Lock()
 	ui.status = "Copied to clipboard"
+	ui.statusMutex.Unlock()
 	go ui.clearClipboard()
 }
 
 func (ui *UI) clearClipboard() {
-	// FIXME bad concurrency pattern here, just for development time
-	// TODO move it to dedicated routine with channel interaction
+	ui.statusMutex.Lock()
 	if ui.countdown > 0 {
 		ui.countdown = float32(ui.config.PasswordStoreClipSeconds)
+		ui.statusMutex.Unlock()
 		return
 	}
 	if ui.countingDown {
+		ui.statusMutex.Unlock()
 		ui.countdownDone <- true
+		return
 	}
 	ui.countingDown = true
+	ui.statusMutex.Unlock()
 
 	tick := 200 * time.Millisecond
 	ticker := time.NewTicker(tick)
@@ -193,19 +210,25 @@ func (ui *UI) clearClipboard() {
 	for {
 		select {
 		case <-ui.countdownDone:
+			ui.statusMutex.Lock()
 			ui.countingDown = false
+			ui.statusMutex.Unlock()
 			return
 		case <-ticker.C:
+			ui.statusMutex.Lock()
 			ui.countdown = float32(remaining / float64(ui.config.PasswordStoreClipSeconds))
 			ui.status = fmt.Sprintf("Will clear %s in %.0f seconds", ui.storage.NameByIdx(ui.selectedIdx), remaining)
+			ui.statusMutex.Unlock()
 			if ui.window != nil {
 				ui.window.Invalidate()
 			}
 			remaining -= tick.Seconds()
 			if remaining <= 0 {
 				clipboard.WriteAll("")
+				ui.statusMutex.Lock()
 				ui.status = "Clipboard cleared"
 				ui.countingDown = false
+				ui.statusMutex.Unlock()
 				if ui.window != nil {
 					ui.window.Invalidate()
 				}
@@ -350,7 +373,10 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if ui.countingDown {
+			ui.statusMutex.RLock()
+			countingDown := ui.countingDown
+			ui.statusMutex.RUnlock()
+			if countingDown {
 				return ui.layoutProgressBar(gtx)
 			}
 			return layout.Dimensions{}
@@ -372,7 +398,10 @@ func (ui *UI) layoutLeftPane(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				label := material.Body2(ui.theme, ui.status)
+				ui.statusMutex.RLock()
+				status := ui.status
+				ui.statusMutex.RUnlock()
+				label := material.Body2(ui.theme, status)
 				label.Color = color.NRGBA{R: 170, G: 170, B: 170, A: 255}
 				return label.Layout(gtx)
 			})
@@ -443,7 +472,10 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if ui.countingDown {
+						ui.statusMutex.RLock()
+						countingDown := ui.countingDown
+						ui.statusMutex.RUnlock()
+						if countingDown {
 							return ui.layoutCountdown(gtx)
 						}
 						return layout.Dimensions{}
@@ -568,7 +600,11 @@ func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
 	fullWidth := gtx.Constraints.Max.X
 
 	// Calculate filled width based on countdown progress
-	filledWidth := int(float32(fullWidth) * ui.countdown)
+	ui.statusMutex.RLock()
+	countdown := ui.countdown
+	ui.statusMutex.RUnlock()
+
+	filledWidth := int(float32(fullWidth) * countdown)
 	if filledWidth < 0 {
 		filledWidth = 0
 	}
@@ -588,9 +624,9 @@ func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
 		defer clip.Rect{Max: filledRect}.Push(gtx.Ops).Pop()
 		// Green-to-yellow-to-red gradient based on progress
 		var progressColor color.NRGBA
-		if ui.countdown > 0.5 {
+		if countdown > 0.5 {
 			// Green to yellow (1.0 -> 0.5)
-			t := (ui.countdown - 0.5) * 2
+			t := (countdown - 0.5) * 2
 			progressColor = color.NRGBA{
 				R: uint8(255 * (1 - t)),
 				G: 200,
@@ -599,7 +635,7 @@ func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
 			}
 		} else {
 			// Yellow to red (0.5 -> 0.0)
-			t := ui.countdown * 2
+			t := countdown * 2
 			progressColor = color.NRGBA{
 				R: 255,
 				G: uint8(200 * t),

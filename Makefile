@@ -7,6 +7,10 @@ build:
 run:
 	go run ./...
 
+.PHONY: race
+race:
+	go run -race ./...
+
 .PHONY: clean
 clean:
 	rm -rf build
