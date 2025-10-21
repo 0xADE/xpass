@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"gioui.org/font"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -87,6 +89,10 @@ type UI struct {
 	saveButton     widget.Clickable
 	cancelButton   widget.Clickable
 	passgenButton  widget.Clickable
+	// Create mode
+	createMode   bool
+	createEditor widget.Editor
+	addButton    widget.Clickable
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -113,6 +119,9 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 
 	ui.editModeEditor.SingleLine = false
 	ui.editModeEditor.ReadOnly = false
+
+	ui.createEditor.SingleLine = true
+	ui.createEditor.Submit = true
 
 	store.Subscribe(func(status string) {
 		ui.statusMutex.Lock()
@@ -316,27 +325,8 @@ func (ui *UI) saveEditMode() {
 	content := ui.editModeEditor.Text()
 	fmt.Printf("DEBUG: Content length: %d\n", len(content))
 
-	// Get GPG recipient(s) from .gpg-id file
-	var gpgIDs []string
-	if ui.config.PasswordStoreKey != "" {
-		gpgIDs = []string{ui.config.PasswordStoreKey}
-	} else {
-		// Try reading .gpg-id file from password store
-		gpgIDPath := strings.Replace(ui.config.PasswordStoreDir, "~", os.Getenv("HOME"), 1) + "/.gpg-id"
-		fmt.Printf("DEBUG: Reading GPG ID from: %s\n", gpgIDPath)
-		data, err := os.ReadFile(gpgIDPath)
-		if err == nil {
-			lines := strings.Split(string(data), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" && !strings.HasPrefix(line, "#") {
-					gpgIDs = append(gpgIDs, line)
-				}
-			}
-		} else {
-			fmt.Printf("DEBUG: Error reading .gpg-id: %v\n", err)
-		}
-	}
+	// Get GPG recipient(s)
+	gpgIDs := ui.getGPGRecipients()
 
 	if len(gpgIDs) == 0 {
 		ui.statusMutex.Lock()
@@ -399,6 +389,80 @@ func (ui *UI) cancelEditMode() {
 	// Request focus back to search editor
 	if ui.window != nil {
 		ui.window.Invalidate()
+	}
+}
+
+func (ui *UI) getGPGRecipients() []string {
+	var gpgIDs []string
+	if ui.config.PasswordStoreKey != "" {
+		return []string{ui.config.PasswordStoreKey}
+	}
+	// Try reading .gpg-id file from password store
+	gpgIDPath := filepath.Join(ui.storage.Path(), ".gpg-id")
+	fmt.Printf("DEBUG: Reading GPG ID from: %s\n", gpgIDPath)
+	data, err := os.ReadFile(gpgIDPath)
+	if err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				gpgIDs = append(gpgIDs, line)
+			}
+		}
+	} else {
+		fmt.Printf("DEBUG: Error reading .gpg-id: %v\n", err)
+	}
+	return gpgIDs
+}
+
+func (ui *UI) createNewPassword() {
+	name := ui.createEditor.Text()
+	if name == "" {
+		ui.status = "Password name cannot be empty"
+		return
+	}
+	name = strings.TrimSuffix(name, ".gpg")
+
+	gpgIDs := ui.getGPGRecipients()
+	if len(gpgIDs) == 0 {
+		ui.statusMutex.Lock()
+		ui.status = "No GPG key configured"
+		ui.statusMutex.Unlock()
+		return
+	}
+
+	fullPath, err := ui.storage.Create(name, "\n", gpgIDs)
+	if err != nil {
+		ui.statusMutex.Lock()
+		ui.status = fmt.Sprintf("Failed to create: %v", err)
+		ui.statusMutex.Unlock()
+		return
+	}
+
+	ui.createMode = false
+	ui.statusMutex.Lock()
+	ui.status = "Created successfully"
+	ui.statusMutex.Unlock()
+
+	// The watcher in storage should have updated the list.
+	// We call updateQuery to be safe and to get the new list immediately.
+	ui.updateQuery()
+
+	found := false
+	for i, item := range ui.filtered {
+		if item.Path == fullPath {
+			ui.selectedIdx = i
+			found = true
+			break
+		}
+	}
+
+	if found {
+		ui.enterEditMode()
+	} else {
+		ui.statusMutex.Lock()
+		ui.status = "Could not select new password"
+		ui.statusMutex.Unlock()
 	}
 }
 
@@ -517,7 +581,7 @@ func (ui *UI) loop() error {
 			}
 
 			// Focus search editor when not in edit mode
-			if !ui.editMode {
+			if !ui.editMode && !ui.createMode {
 				gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
 			}
 
@@ -545,7 +609,7 @@ func (ui *UI) loop() error {
 			filters = append(filters, key.Filter{Name: key.NameEscape})
 
 			// Don't filter arrow keys in edit mode - let the editor handle them
-			if !ui.editMode {
+			if !ui.editMode && !ui.createMode {
 				filters = append(filters,
 					key.Filter{Name: key.NameUpArrow},
 					key.Filter{Name: key.NameDownArrow},
@@ -570,10 +634,17 @@ func (ui *UI) loop() error {
 					if kev.State == key.Press {
 						switch kev.Name {
 						case key.NameEscape:
-							os.Exit(0)
+							if ui.createMode {
+								ui.createMode = false
+								gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
+							} else if ui.editMode {
+								ui.cancelEditMode()
+							} else {
+								os.Exit(0)
+							}
 						case key.NameUpArrow:
 							// Don't handle arrow keys in edit mode - let the editor handle them
-							if !ui.editMode {
+							if !ui.editMode && !ui.createMode {
 								ui.moveSelectionUp()
 								ui.keyRepeatActive = true
 								ui.keyRepeatName = key.NameUpArrow
@@ -581,7 +652,7 @@ func (ui *UI) loop() error {
 							}
 						case key.NameDownArrow:
 							// Don't handle arrow keys in edit mode - let the editor handle them
-							if !ui.editMode {
+							if !ui.editMode && !ui.createMode {
 								ui.moveSelectionDown()
 								ui.keyRepeatActive = true
 								ui.keyRepeatName = key.NameDownArrow
@@ -655,7 +726,7 @@ func (ui *UI) loop() error {
 			}
 
 			// Handle key repeat for arrow keys (only when not in edit mode)
-			if ui.keyRepeatActive && !ui.editMode {
+			if ui.keyRepeatActive && !ui.editMode && !ui.createMode {
 				elapsed := time.Since(ui.keyRepeatStart)
 				initialDelay := 200 * time.Millisecond
 				repeatInterval := 30 * time.Millisecond
@@ -681,14 +752,14 @@ func (ui *UI) loop() error {
 					// Wait for initial delay
 					gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(initialDelay - elapsed)})
 				}
-			} else if ui.editMode && ui.keyRepeatActive {
+			} else if (ui.editMode || ui.createMode) && ui.keyRepeatActive {
 				// Stop key repeat when entering edit mode
 				ui.keyRepeatActive = false
 			}
 			// ===== END OF KEYBOARD HANDLING =====
 
-			// Don't process search editor events when in edit mode
-			if !ui.editMode {
+			// Don't process search editor events when in edit or create mode
+			if !ui.editMode && !ui.createMode {
 				for {
 					ev, ok := ui.searchEditor.Update(gtx)
 					if !ok {
@@ -705,6 +776,19 @@ func (ui *UI) loop() error {
 						}
 					case widget.SubmitEvent:
 						ui.copyToClipboard()
+					}
+				}
+			}
+
+			if ui.createMode {
+				for {
+					ev, ok := ui.createEditor.Update(gtx)
+					if !ok {
+						break
+					}
+					switch ev.(type) {
+					case widget.SubmitEvent:
+						ui.createNewPassword()
 					}
 				}
 			}
@@ -889,7 +973,7 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 	gtx.Constraints.Max.X = gtx.Dp(unit.Dp(600))
 	gtx.Constraints.Min.X = gtx.Dp(unit.Dp(300))
 
-	return layout.Stack{}.Layout(gtx,
+	return layout.Stack{layout.NE}.Layout(gtx,
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			rect := clip.Rect{Max: gtx.Constraints.Max}
 			paint.FillShape(gtx.Ops, color.NRGBA{R: 68, G: 68, B: 68, A: 255}, rect.Op())
@@ -1086,6 +1170,30 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 				)
 			})
 		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if ui.createMode {
+				// Align editor to bottom of the pane
+				return layout.S.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Execute(key.FocusCmd{Tag: &ui.createEditor})
+						editor := material.Editor(ui.theme, &ui.createEditor, "path/for/new/password")
+						editor.TextSize = unit.Sp(18)
+						// Add a border to the editor
+						border := widget.Border{Color: color.NRGBA{A: 255}, CornerRadius: unit.Dp(4), Width: unit.Dp(2)}
+						return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.UniformInset(unit.Dp(8)).Layout(gtx, editor.Layout)
+						})
+					})
+				})
+			}
+			if !ui.editMode && !ui.createMode {
+				// Align button to bottom-right
+				return layout.SE.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.UniformInset(unit.Dp(16)).Layout(gtx, ui.layoutAddButton)
+				})
+			}
+			return layout.Dimensions{}
+		}),
 	)
 }
 
@@ -1109,13 +1217,7 @@ func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
 	countdown := ui.countdown
 	ui.statusMutex.RUnlock()
 
-	filledWidth := int(float32(fullWidth) * countdown)
-	if filledWidth < 0 {
-		filledWidth = 0
-	}
-	if filledWidth > fullWidth {
-		filledWidth = fullWidth
-	}
+	filledWidth := min(max(int(float32(fullWidth)*countdown), 0), fullWidth)
 
 	// Draw background (empty part)
 	bgRect := image.Pt(fullWidth, barHeight)
@@ -1322,4 +1424,57 @@ func (ui *UI) layoutPasswordField(gtx layout.Context, password string) layout.Di
 			})
 		}),
 	)
+}
+
+func (ui *UI) layoutAddButton(gtx layout.Context) layout.Dimensions {
+	if ui.addButton.Clicked(gtx) {
+		ui.createMode = true
+		ui.createEditor.SetText("")
+		gtx.Execute(key.FocusCmd{Tag: &ui.createEditor})
+	}
+
+	return ui.addButton.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// Button dimensions
+		size := gtx.Dp(unit.Dp(56))
+		col := color.NRGBA{R: 100, G: 150, B: 200, A: 255} // light-blue
+
+		// Draw circle
+		bounds := image.Rect(0, 0, size, size)
+		radius := float32(size) / 2.0
+
+		defer clip.RRect{
+			Rect: bounds,
+			NW:   int(radius), NE: int(radius), SW: int(radius), SE: int(radius),
+		}.Push(gtx.Ops).Pop()
+
+		// Background color
+		paint.ColorOp{Color: col}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+
+		// Draw '+' icon
+		plusColor := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+		plusThickness := float32(gtx.Dp(unit.Dp(3)))
+		plusSize := float32(size) / 2.0
+		center := float32(size) / 2.0
+
+		// Horizontal bar
+		hBar := image.Rect(
+			int(center-plusSize/2), int(center-plusThickness/2),
+			int(center+plusSize/2), int(center+plusThickness/2),
+		)
+		paint.FillShape(gtx.Ops, plusColor, clip.Rect(hBar).Op())
+
+		// Vertical bar
+		vBar := image.Rect(
+			int(center-plusThickness/2), int(center-plusSize/2),
+			int(center+plusThickness/2), int(center+plusSize/2),
+		)
+		paint.FillShape(gtx.Ops, plusColor, clip.Rect(vBar).Op())
+
+		if ui.addButton.Hovered() {
+			pointer.CursorPointer.Add(gtx.Ops)
+		}
+
+		return layout.Dimensions{Size: image.Pt(size, size)}
+	})
 }

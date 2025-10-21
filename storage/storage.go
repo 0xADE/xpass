@@ -2,10 +2,12 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/user"
 	"path"
 	"path/filepath"
@@ -16,6 +18,41 @@ import (
 
 	"github.com/rjeczalik/notify"
 )
+
+func (s *Storage) Create(name string, content string, gpgIDs []string) (string, error) {
+	fullPath := filepath.Join(s.path, name+".gpg")
+
+	// Create subdirectories if they don't exist
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	if len(gpgIDs) == 0 {
+		return "", errors.New("no GPG key configured")
+	}
+
+	// Encrypt with GPG - add all recipients
+	args := []string{"--encrypt", "--batch", "--yes", "--output", fullPath, "--armor"}
+	for _, gpgID := range gpgIDs {
+		args = append(args, "--recipient", gpgID)
+	}
+
+	cmd := exec.Command("gpg", args...)
+	cmd.Stdin = strings.NewReader(content)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to encrypt: %v: %s", err, stderr.String())
+	}
+
+	// The watcher should pick up the change, but for immediate UI update, we can re-index here.
+	s.IndexAll()
+
+	return fullPath, nil
+}
 
 type Subscriber func(status string)
 
@@ -40,6 +77,10 @@ func Init(basePath, key string) (*Storage, error) {
 	s.IndexAll()
 	s.watch()
 	return s, nil
+}
+
+func (s *Storage) Path() string {
+	return s.path
 }
 
 func (s *Storage) Query(query string) []passcard.StoredItem {
