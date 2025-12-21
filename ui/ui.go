@@ -56,6 +56,7 @@ type UI struct {
 	countdown     float32
 	countdownDone chan bool
 	statusMutex   sync.RWMutex
+	decryptFailed map[string]bool
 
 	initialized          bool
 	metadataState        richtext.InteractiveText
@@ -109,6 +110,7 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		queryInput:          make(chan string, 64),
 		queryResults:        make(chan []passcard.StoredItem, 1),
 		stopFilter:          make(chan struct{}),
+		decryptFailed:       make(map[string]bool),
 	}
 
 	ui.searchEditor.SingleLine = true
@@ -206,7 +208,23 @@ func (ui *UI) copyToClipboard() {
 	}
 
 	pw := ui.filtered[ui.selectedIdx]
-	pass := pw.Password()
+	decrypted, err := ui.getDecryptedContent(pw)
+	if err != nil || decrypted == "" {
+		return
+	}
+
+	lines := strings.SplitN(decrypted, "\n", 2)
+	pass := ""
+	if len(lines) > 0 {
+		pass = strings.TrimSpace(lines[0])
+	}
+	if pass == "" {
+		ui.statusMutex.Lock()
+		ui.status = "No password found"
+		ui.statusMutex.Unlock()
+		return
+	}
+
 	if err := clipboard.WriteAll(pass); err != nil {
 		ui.statusMutex.Lock()
 		ui.status = fmt.Sprintf("Failed to copy: %v", err)
@@ -255,6 +273,72 @@ func (ui *UI) copyFieldByKeys(keys ...string) {
 		return
 	}
 	ui.copyFieldToClipboard(value)
+}
+
+// getDecryptedContent returns decrypted content if available. On the
+// first failure it records the path to avoid repeated GPG prompts and
+// updates status to instruct the user to retry manually.
+func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
+	if item.Storage == nil {
+		return "", fmt.Errorf("no storage available for item")
+	}
+
+	// Serve cached content when present
+	if cached, ok := item.Storage.GetCached(item.Path); ok && cached != "" {
+		// Clear previous failure flag if cache is now available
+		delete(ui.decryptFailed, item.Path)
+		return cached, nil
+	}
+
+	// If a previous attempt failed, avoid re-prompting
+	if ui.decryptFailed[item.Path] {
+		ui.statusMutex.Lock()
+		ui.status = "Wrong key. Press Ctrl+R to retry"
+		ui.statusMutex.Unlock()
+		return "", fmt.Errorf("decrypt previously failed")
+	}
+
+	// Attempt decryption once
+	decrypted, err := item.Decrypt()
+	if err != nil {
+		ui.decryptFailed[item.Path] = true
+		ui.statusMutex.Lock()
+		ui.status = "Wrong key. Press Ctrl+R to retry"
+		ui.statusMutex.Unlock()
+		if ui.window != nil {
+			ui.window.Invalidate()
+		}
+		return "", err
+	}
+
+	delete(ui.decryptFailed, item.Path)
+	return decrypted, nil
+}
+
+// retryDecryptSelected clears the failure marker and performs a single retry
+// for the currently selected item.
+func (ui *UI) retryDecryptSelected() {
+	if ui.selectedIdx >= len(ui.filtered) {
+		return
+	}
+
+	item := ui.filtered[ui.selectedIdx]
+	delete(ui.decryptFailed, item.Path)
+
+	decrypted, err := ui.getDecryptedContent(item)
+	if err != nil {
+		return
+	}
+
+	if decrypted != "" {
+		ui.statusMutex.Lock()
+		ui.status = "Decrypted"
+		ui.statusMutex.Unlock()
+	}
+
+	if ui.window != nil {
+		ui.window.Invalidate()
+	}
 }
 
 func (ui *UI) openURL(url string) {
@@ -623,6 +707,7 @@ func (ui *UI) loop() error {
 				key.Filter{Name: "E"},
 				key.Filter{Name: "O"},
 				key.Filter{Name: "M"},
+				key.Filter{Name: "R"},
 			)
 
 			for {
@@ -714,6 +799,10 @@ func (ui *UI) loop() error {
 							if kev.Modifiers.Contain(key.ModCtrl) {
 								fmt.Println("DEBUG: Ctrl+M detected, calling enterEditMode()")
 								ui.enterEditMode()
+							}
+						case "R":
+							if kev.Modifiers.Contain(key.ModCtrl) {
+								ui.retryDecryptSelected()
 							}
 						}
 					} else if kev.State == key.Release {
@@ -1065,9 +1154,15 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 								)
 							}
 
-							fullContent := ui.filtered[ui.selectedIdx].FullContent()
-							if fullContent == "" {
-								fullContent = "Press Enter to decrypt"
+							item := ui.filtered[ui.selectedIdx]
+							fullContent := "Press Enter to decrypt"
+
+							if decrypted, err := ui.getDecryptedContent(item); err == nil {
+								if decrypted != "" {
+									fullContent = decrypted
+								}
+							} else if ui.decryptFailed[item.Path] {
+								fullContent = "Wrong key. Press Ctrl+R to retry"
 							}
 
 							// Handle clicks in rich text mode

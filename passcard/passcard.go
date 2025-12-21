@@ -46,6 +46,12 @@ func (p *StoredItem) decrypt() (string, error) {
 	return result, nil
 }
 
+// Decrypt returns decrypted content and an error to allow callers to
+// distinguish between empty content and a failed GPG attempt.
+func (p *StoredItem) Decrypt() (string, error) {
+	return p.decrypt()
+}
+
 func (p *StoredItem) Raw() string {
 	file, err := os.Open(p.Path)
 	if err != nil {
