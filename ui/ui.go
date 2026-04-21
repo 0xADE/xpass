@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"image"
@@ -33,6 +34,11 @@ import (
 	"gioui.org/x/richtext"
 
 	"github.com/atotto/clipboard"
+)
+
+const (
+	statusWrongKeyRetry  = "Wrong key. Press Ctrl+R to retry"
+	msgPressEnterDecrypt = "Press Enter to decrypt"
 )
 
 type fieldWidget struct {
@@ -293,7 +299,7 @@ func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
 	// If a previous attempt failed, avoid re-prompting
 	if ui.decryptFailed[item.Path] {
 		ui.statusMutex.Lock()
-		ui.status = "Wrong key. Press Ctrl+R to retry"
+		ui.status = statusWrongKeyRetry
 		ui.statusMutex.Unlock()
 		return "", fmt.Errorf("decrypt previously failed")
 	}
@@ -303,7 +309,7 @@ func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
 	if err != nil {
 		ui.decryptFailed[item.Path] = true
 		ui.statusMutex.Lock()
-		ui.status = "Wrong key. Press Ctrl+R to retry"
+		ui.status = statusWrongKeyRetry
 		ui.statusMutex.Unlock()
 		if ui.window != nil {
 			ui.window.Invalidate()
@@ -349,7 +355,7 @@ func (ui *UI) openURL(url string) {
 		return
 	}
 
-	cmd := exec.Command("xdg-open", url)
+	cmd := exec.CommandContext(context.Background(), "xdg-open", url)
 	if err := cmd.Start(); err != nil {
 		ui.statusMutex.Lock()
 		ui.status = fmt.Sprintf("Failed to open URL: %v", err)
@@ -427,7 +433,7 @@ func (ui *UI) saveEditMode() {
 		args = append(args, "--recipient", gpgID)
 	}
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.CommandContext(context.Background(), "gpg", args...) //nolint:gosec // G204: fixed gpg flags; paths from password store.
 	cmd.Stdin = strings.NewReader(content)
 
 	// Capture stderr for better error messages
@@ -467,7 +473,7 @@ func (ui *UI) saveEditMode() {
 func (ui *UI) cancelEditMode() {
 	ui.editMode = false
 	ui.statusMutex.Lock()
-	ui.status = "Edit cancelled"
+	ui.status = "Edit canceled"
 	ui.statusMutex.Unlock()
 
 	// Request focus back to search editor
@@ -482,9 +488,16 @@ func (ui *UI) getGPGRecipients() []string {
 		return []string{ui.config.PasswordStoreKey}
 	}
 	// Try reading .gpg-id file from password store
-	gpgIDPath := filepath.Join(ui.storage.Path(), ".gpg-id")
-	fmt.Printf("DEBUG: Reading GPG ID from: %s\n", gpgIDPath)
-	data, err := os.ReadFile(gpgIDPath)
+	storeRoot := filepath.Clean(ui.storage.Path())
+	gpgIDPath := filepath.Join(storeRoot, ".gpg-id")
+	gpgClean := filepath.Clean(gpgIDPath)
+	rel, errRel := filepath.Rel(storeRoot, gpgClean)
+	if errRel != nil || strings.HasPrefix(rel, "..") {
+		fmt.Printf("DEBUG: .gpg-id path outside store: rel=%q err=%v\n", rel, errRel)
+		return gpgIDs
+	}
+	fmt.Printf("DEBUG: Reading GPG ID from: %s\n", gpgClean)
+	data, err := os.ReadFile(gpgClean)
 	if err == nil {
 		lines := strings.Split(string(data), "\n")
 		for _, line := range lines {
@@ -597,6 +610,108 @@ func (ui *UI) clearClipboard() {
 				}
 				return
 			}
+		}
+	}
+}
+
+func (ui *UI) copyMetadataSelectionToClipboard() {
+	if ui.showRichText || ui.metadataEditor.Text() == "" {
+		return
+	}
+	start, end := ui.metadataEditor.Selection()
+	if start == end {
+		return
+	}
+	if start > end {
+		start, end = end, start
+	}
+	text := ui.metadataEditor.Text()
+	if start >= len(text) || end > len(text) {
+		return
+	}
+	ui.copyFieldToClipboard(text[start:end])
+}
+
+func (ui *UI) handleGlobalKeyboardEvent(gtx layout.Context, kev key.Event) {
+	switch kev.State {
+	case key.Press:
+		ui.handleGlobalKeyPress(gtx, kev)
+	case key.Release:
+		if ui.keyRepeatActive && kev.Name == ui.keyRepeatName {
+			ui.keyRepeatActive = false
+		}
+	}
+}
+
+func (ui *UI) handleGlobalKeyPress(gtx layout.Context, kev key.Event) {
+	switch kev.Name {
+	case key.NameEscape:
+		if ui.createMode {
+			ui.createMode = false
+			gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
+		} else if ui.editMode {
+			ui.cancelEditMode()
+		} else {
+			os.Exit(0)
+		}
+	case key.NameUpArrow:
+		if !ui.editMode && !ui.createMode {
+			ui.moveSelectionUp()
+			ui.keyRepeatActive = true
+			ui.keyRepeatName = key.NameUpArrow
+			ui.keyRepeatStart = time.Now()
+		}
+	case key.NameDownArrow:
+		if !ui.editMode && !ui.createMode {
+			ui.moveSelectionDown()
+			ui.keyRepeatActive = true
+			ui.keyRepeatName = key.NameDownArrow
+			ui.keyRepeatStart = time.Now()
+		}
+	case "T":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			ui.showRichText = !ui.showRichText
+		}
+	case "C":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			ui.copyMetadataSelectionToClipboard()
+		}
+	case "L":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			ui.copyFieldByKeys("login", "user", "username")
+		}
+	case "E":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			ui.copyFieldByKeys("email", "mail", "e-mail")
+		}
+	case "O":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			url := ui.findFieldValue("url", "link")
+			if url == "" {
+				for _, pair := range ui.kvPairs {
+					if strings.Contains(pair.Value, "://") {
+						url = pair.Value
+						break
+					}
+				}
+			}
+			if url != "" {
+				ui.openURL(url)
+			} else {
+				ui.statusMutex.Lock()
+				ui.status = "No URL found"
+				ui.statusMutex.Unlock()
+			}
+		}
+	case "M":
+		fmt.Printf("DEBUG: M key pressed, modifiers: %v, editMode: %v\n", kev.Modifiers, ui.editMode)
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			fmt.Println("DEBUG: Ctrl+M detected, calling enterEditMode()")
+			ui.enterEditMode()
+		}
+	case "R":
+		if kev.Modifiers.Contain(key.ModCtrl) {
+			ui.retryDecryptSelected()
 		}
 	}
 }
@@ -716,101 +831,7 @@ func (ui *UI) loop() error {
 					break
 				}
 				if kev, ok := ev.(key.Event); ok {
-					if kev.State == key.Press {
-						switch kev.Name {
-						case key.NameEscape:
-							if ui.createMode {
-								ui.createMode = false
-								gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
-							} else if ui.editMode {
-								ui.cancelEditMode()
-							} else {
-								os.Exit(0)
-							}
-						case key.NameUpArrow:
-							// Don't handle arrow keys in edit mode - let the editor handle them
-							if !ui.editMode && !ui.createMode {
-								ui.moveSelectionUp()
-								ui.keyRepeatActive = true
-								ui.keyRepeatName = key.NameUpArrow
-								ui.keyRepeatStart = time.Now()
-							}
-						case key.NameDownArrow:
-							// Don't handle arrow keys in edit mode - let the editor handle them
-							if !ui.editMode && !ui.createMode {
-								ui.moveSelectionDown()
-								ui.keyRepeatActive = true
-								ui.keyRepeatName = key.NameDownArrow
-								ui.keyRepeatStart = time.Now()
-							}
-						case "T":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								ui.showRichText = !ui.showRichText
-							}
-						case "C":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								// Copy selected text from metadata editor or focused field
-								if !ui.showRichText && ui.metadataEditor.Text() != "" {
-									// In plain text mode, copy selection if any
-									start, end := ui.metadataEditor.Selection()
-									if start != end {
-										if start > end {
-											start, end = end, start
-										}
-										text := ui.metadataEditor.Text()
-										if start < len(text) && end <= len(text) {
-											selectedText := text[start:end]
-											ui.copyFieldToClipboard(selectedText)
-										}
-									}
-								}
-							}
-						case "L":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								ui.copyFieldByKeys("login", "user", "username")
-							}
-						case "E":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								ui.copyFieldByKeys("email", "mail", "e-mail")
-							}
-						case "O":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								// Try to find URL field first
-								url := ui.findFieldValue("url", "link")
-								if url == "" {
-									// Look for any field value starting with protocol
-									for _, pair := range ui.kvPairs {
-										if strings.Contains(pair.Value, "://") {
-											url = pair.Value
-											break
-										}
-									}
-								}
-								if url != "" {
-									ui.openURL(url)
-								} else {
-									ui.statusMutex.Lock()
-									ui.status = "No URL found"
-									ui.statusMutex.Unlock()
-								}
-							}
-						case "M":
-							fmt.Printf("DEBUG: M key pressed, modifiers: %v, editMode: %v\n", kev.Modifiers, ui.editMode)
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								fmt.Println("DEBUG: Ctrl+M detected, calling enterEditMode()")
-								ui.enterEditMode()
-							}
-						case "R":
-							if kev.Modifiers.Contain(key.ModCtrl) {
-								ui.retryDecryptSelected()
-							}
-						}
-					} else if kev.State == key.Release {
-						// Stop key repeat when key is released
-						if ui.keyRepeatActive && kev.Name == ui.keyRepeatName {
-							ui.keyRepeatActive = false
-						}
-					}
+					ui.handleGlobalKeyboardEvent(gtx, kev)
 				}
 			}
 
@@ -1058,6 +1079,136 @@ func (ui *UI) layoutEditModeButtons(gtx layout.Context) layout.Dimensions {
 	)
 }
 
+func (ui *UI) layoutSelectedItemBody(gtx layout.Context) layout.Dimensions {
+	if ui.selectedIdx >= len(ui.filtered) {
+		return layout.Dimensions{}
+	}
+	if ui.editMode {
+		gtx.Execute(key.FocusCmd{Tag: &ui.editModeEditor})
+		return layout.Stack{}.Layout(gtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				rect := clip.Rect{Max: gtx.Constraints.Max}
+				paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, rect.Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				borderWidth := gtx.Dp(unit.Dp(2))
+				borderColor := color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+				defer clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: borderColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+				innerRect := clip.Rect{
+					Min: image.Pt(borderWidth, borderWidth),
+					Max: image.Pt(gtx.Constraints.Max.X-borderWidth, gtx.Constraints.Max.Y-borderWidth),
+				}
+				defer innerRect.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: color.NRGBA{R: 255, G: 255, B: 255, A: 255}}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+				return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					editor := material.Editor(ui.theme, &ui.editModeEditor, "")
+					editor.Color = color.NRGBA{R: 0, G: 0, B: 0, A: 255}
+					editor.Font.Typeface = font.Typeface("monospace")
+					editor.TextSize = unit.Sp(20)
+					return editor.Layout(gtx)
+				})
+			}),
+		)
+	}
+
+	item := ui.filtered[ui.selectedIdx]
+	fullContent := msgPressEnterDecrypt
+	if decrypted, err := ui.getDecryptedContent(item); err == nil {
+		if decrypted != "" {
+			fullContent = decrypted
+		}
+	} else if ui.decryptFailed[item.Path] {
+		fullContent = statusWrongKeyRetry
+	}
+
+	if ui.showRichText {
+		return ui.layoutRichMetadata(gtx, fullContent)
+	}
+	return ui.layoutPlainMetadata(gtx, fullContent)
+}
+
+func (ui *UI) layoutRichMetadata(gtx layout.Context, fullContent string) layout.Dimensions {
+	var password, metadata string
+	if fullContent != "" && fullContent != msgPressEnterDecrypt {
+		lines := strings.SplitN(fullContent, "\n", 2)
+		password = strings.TrimSpace(lines[0])
+		if len(lines) > 1 {
+			metadata = strings.TrimSpace(lines[1])
+		}
+	}
+	if ui.selectedIdx != ui.lastMetadataItemIdx || fullContent != ui.lastMetadataText {
+		ui.lastMetadataItemIdx = ui.selectedIdx
+		ui.lastMetadataText = fullContent
+		ui.kvPairs, ui.markdownText = ExtractKeyValuePairs(metadata)
+	}
+	ui.lastMetadataRichMode = true
+
+	children := []layout.FlexChild{}
+	if fullContent != msgPressEnterDecrypt {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutPasswordField(gtx, password)
+		}))
+		if len(ui.kvPairs) > 0 || ui.markdownText != "" {
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+		}
+	}
+	for i, pair := range ui.kvPairs {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return ui.layoutKeyValueField(gtx, pair)
+		}))
+		if i < len(ui.kvPairs)-1 {
+			children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
+		}
+	}
+	if len(ui.kvPairs) > 0 && ui.markdownText != "" {
+		children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout))
+	}
+	if ui.markdownText != "" {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if ui.metadataAreaClick.Clicked(gtx) {
+				ui.showRichText = false
+			}
+			return ui.metadataAreaClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				spans := FormatMetadata(ui.markdownText, font.Typeface(""))
+				if len(spans) == 0 {
+					label := material.Body2(ui.theme, ui.markdownText)
+					label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+					label.Font.Typeface = font.Typeface("monospace")
+					label.TextSize = unit.Sp(20)
+					return label.Layout(gtx)
+				}
+				textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
+				return textStyle.Layout(gtx)
+			})
+		}))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+func (ui *UI) plainMetadataNeedsEditorRefresh(fullContent string) bool {
+	return fullContent != ui.lastMetadataText ||
+		ui.selectedIdx != ui.lastMetadataItemIdx ||
+		ui.lastMetadataRichMode
+}
+
+func (ui *UI) layoutPlainMetadata(gtx layout.Context, fullContent string) layout.Dimensions {
+	if ui.plainMetadataNeedsEditorRefresh(fullContent) {
+		ui.metadataEditor.SetText(fullContent)
+		ui.lastMetadataText = fullContent
+		ui.lastMetadataItemIdx = ui.selectedIdx
+		ui.lastMetadataRichMode = false
+	}
+	editor := material.Editor(ui.theme, &ui.metadataEditor, "")
+	editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+	editor.Font.Typeface = font.Typeface("monospace")
+	editor.TextSize = unit.Sp(20)
+	return editor.Layout(gtx)
+}
+
 func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 	gtx.Constraints.Max.X = gtx.Dp(unit.Dp(600))
 	gtx.Constraints.Min.X = gtx.Dp(unit.Dp(300))
@@ -1109,158 +1260,7 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						if ui.selectedIdx < len(ui.filtered) {
-							// Show edit mode if active
-							if ui.editMode {
-								// Request focus for edit mode editor
-								gtx.Execute(key.FocusCmd{Tag: &ui.editModeEditor})
-
-								// Render with white background and gray border
-								return layout.Stack{}.Layout(gtx,
-									layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-										// White background
-										rect := clip.Rect{Max: gtx.Constraints.Max}
-										paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, rect.Op())
-										return layout.Dimensions{Size: gtx.Constraints.Max}
-									}),
-									layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-										// Gray border
-										borderWidth := gtx.Dp(unit.Dp(2))
-										borderColor := color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-
-										// Draw border
-										defer clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops).Pop()
-										paint.ColorOp{Color: borderColor}.Add(gtx.Ops)
-										paint.PaintOp{}.Add(gtx.Ops)
-
-										// Draw inner white area
-										innerRect := clip.Rect{
-											Min: image.Pt(borderWidth, borderWidth),
-											Max: image.Pt(gtx.Constraints.Max.X-borderWidth, gtx.Constraints.Max.Y-borderWidth),
-										}
-										defer innerRect.Push(gtx.Ops).Pop()
-										paint.ColorOp{Color: color.NRGBA{R: 255, G: 255, B: 255, A: 255}}.Add(gtx.Ops)
-										paint.PaintOp{}.Add(gtx.Ops)
-
-										// Content with padding
-										return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											editor := material.Editor(ui.theme, &ui.editModeEditor, "")
-											editor.Color = color.NRGBA{R: 0, G: 0, B: 0, A: 255}
-											editor.Font.Typeface = font.Typeface("monospace")
-											editor.TextSize = unit.Sp(20)
-											return editor.Layout(gtx)
-										})
-									}),
-								)
-							}
-
-							item := ui.filtered[ui.selectedIdx]
-							fullContent := "Press Enter to decrypt"
-
-							if decrypted, err := ui.getDecryptedContent(item); err == nil {
-								if decrypted != "" {
-									fullContent = decrypted
-								}
-							} else if ui.decryptFailed[item.Path] {
-								fullContent = "Wrong key. Press Ctrl+R to retry"
-							}
-
-							// Handle clicks in rich text mode
-							if ui.showRichText {
-								// Split password from metadata
-								var password string
-								var metadata string
-								if fullContent != "" && fullContent != "Press Enter to decrypt" {
-									lines := strings.SplitN(fullContent, "\n", 2)
-									password = strings.TrimSpace(lines[0])
-									if len(lines) > 1 {
-										metadata = strings.TrimSpace(lines[1])
-									}
-								}
-
-								// Mark that we're in rich text mode and track content
-								if ui.selectedIdx != ui.lastMetadataItemIdx || fullContent != ui.lastMetadataText {
-									ui.lastMetadataItemIdx = ui.selectedIdx
-									ui.lastMetadataText = fullContent
-									// Extract key-value pairs from metadata only
-									ui.kvPairs, ui.markdownText = ExtractKeyValuePairs(metadata)
-								}
-								ui.lastMetadataRichMode = true
-
-								// Rich text mode with input widgets for key-value pairs
-								children := []layout.FlexChild{}
-
-								// Add password field first
-								if fullContent != "Press Enter to decrypt" {
-									children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										return ui.layoutPasswordField(gtx, password)
-									}))
-									if len(ui.kvPairs) > 0 || ui.markdownText != "" {
-										children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
-									}
-								}
-
-								// Add key-value fields (not clickable for mode switching)
-								for i, pair := range ui.kvPairs {
-									children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										return ui.layoutKeyValueField(gtx, pair)
-									}))
-									if i < len(ui.kvPairs)-1 {
-										children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
-									}
-								}
-
-								// Add spacing if both sections exist
-								if len(ui.kvPairs) > 0 && ui.markdownText != "" {
-									children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout))
-								}
-
-								// Add markdown section (clickable for mode switching)
-								if ui.markdownText != "" {
-									children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										// Check for click to switch to plain text
-										if ui.metadataAreaClick.Clicked(gtx) {
-											ui.showRichText = false
-										}
-
-										return ui.metadataAreaClick.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											// Render markdown using richtext
-											spans := FormatMetadata(ui.markdownText, font.Typeface(""))
-											if len(spans) == 0 {
-												// Fallback to simple text if no spans generated
-												label := material.Body2(ui.theme, ui.markdownText)
-												label.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-												label.Font.Typeface = font.Typeface("monospace")
-												label.TextSize = unit.Sp(20)
-												return label.Layout(gtx)
-											}
-											textStyle := richtext.Text(&ui.metadataState, ui.theme.Shaper, spans...)
-											return textStyle.Layout(gtx)
-										})
-									}))
-								}
-
-								return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
-							} else {
-								// Plain text mode - selectable with mouse
-								// Only update text if content changed or mode switched
-								if fullContent != ui.lastMetadataText ||
-									ui.selectedIdx != ui.lastMetadataItemIdx ||
-									ui.lastMetadataRichMode {
-									ui.metadataEditor.SetText(fullContent)
-									ui.lastMetadataText = fullContent
-									ui.lastMetadataItemIdx = ui.selectedIdx
-									ui.lastMetadataRichMode = false
-								}
-
-								editor := material.Editor(ui.theme, &ui.metadataEditor, "")
-								editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-								editor.Font.Typeface = font.Typeface("monospace")
-								editor.TextSize = unit.Sp(20)
-								return editor.Layout(gtx)
-							}
-						}
-						return layout.Dimensions{}
+						return ui.layoutSelectedItemBody(gtx)
 					}),
 				)
 			})
@@ -1353,7 +1353,6 @@ func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
 }
 
 func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.Dimensions {
-	// Get or create field widget for this key
 	fw, exists := ui.fieldWidgets[pair.Key]
 	if !exists {
 		fw = &fieldWidget{}
@@ -1362,43 +1361,47 @@ func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.
 		ui.fieldWidgets[pair.Key] = fw
 	}
 
-	// Update editor text if value changed
-	if fw.editor.Text() != pair.Value {
-		fw.editor.SetText(pair.Value)
+	displayValue := pair.Value
+	if pair.IsMasked {
+		displayValue = MaskPassword(pair.Value)
+	}
+	if fw.editor.Text() != displayValue {
+		fw.editor.SetText(displayValue)
 	}
 
-	// Handle clicks on label
 	if fw.labelClickable.Clicked(gtx) {
 		ui.copyFieldToClipboard(pair.Value)
 	}
 
-	// Handle clicks on input widget
 	if fw.clickable.Clicked(gtx) {
 		ui.copyFieldToClipboard(pair.Value)
 	}
+
+	labelColor := color.NRGBA{R: 238, G: 238, B: 238, A: 255}
+	valueColor := color.NRGBA{R: 200, G: 200, B: 200, A: 255}
+	borderColor := color.NRGBA{R: 100, G: 150, B: 200, A: 255}
+	labelSize := unit.Sp(18)
+	valueSize := unit.Sp(18)
 
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return fw.labelClickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				label := material.Body1(ui.theme, pair.Key+":")
-				label.Color = color.NRGBA{R: 238, G: 238, B: 238, A: 255}
-				label.TextSize = unit.Sp(18)
+				label.Color = labelColor
+				label.TextSize = labelSize
 				label.Font.Weight = font.Bold
 				return layout.Inset{Right: unit.Dp(12)}.Layout(gtx, label.Layout)
 			})
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return fw.clickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				// First render the editor to get its dimensions
 				macro := op.Record(gtx.Ops)
 				editor := material.Editor(ui.theme, &fw.editor, "")
-				editor.Color = color.NRGBA{R: 200, G: 200, B: 200, A: 255}
-				editor.TextSize = unit.Sp(18)
+				editor.Color = valueColor
+				editor.TextSize = valueSize
 				dims := editor.Layout(gtx)
 				call := macro.Stop()
 
-				// Draw rounded border using selection color
-				borderColor := color.NRGBA{R: 100, G: 150, B: 200, A: 255} // Same as selection but fully opaque
 				borderRadius := gtx.Dp(unit.Dp(4))
 				borderWidth := gtx.Dp(unit.Dp(1))
 

@@ -33,10 +33,13 @@ var (
 // Key-value pattern: word(s) without spaces or colons, followed by colon
 var keyValuePattern = regexp.MustCompile(`^([^\s:]+):\s*(.*)$`)
 
-// KeyValuePair represents a single key-value field
+// KeyValuePair represents a single key-value field.
+// IsMasked is true when the key starts with "."; such values are rendered masked
+// in rich-text mode (the dot remains part of the displayed key name).
 type KeyValuePair struct {
-	Key   string
-	Value string
+	Key      string
+	Value    string
+	IsMasked bool
 }
 
 // MaskPassword returns a masked representation of a password
@@ -49,6 +52,10 @@ func MaskPassword(password string) string {
 
 // ExtractKeyValuePairs parses text and separates key:value pairs from markdown content.
 // Returns the array of key-value pairs and remaining text (markdown/other content).
+//
+// A key whose name starts with "." is treated as sensitive: IsMasked is true so
+// the formatted view can mask its value. Keys without a leading dot are shown
+// unmasked.
 func ExtractKeyValuePairs(text string) ([]KeyValuePair, string) {
 	if text == "" {
 		return nil, ""
@@ -56,7 +63,7 @@ func ExtractKeyValuePairs(text string) ([]KeyValuePair, string) {
 
 	lines := strings.Split(text, "\n")
 	var pairs []KeyValuePair
-	var remainingLines []string
+	remainingLines := make([]string, 0, len(lines))
 	inKeyValueSection := true
 
 	for _, line := range lines {
@@ -65,28 +72,27 @@ func ExtractKeyValuePairs(text string) ([]KeyValuePair, string) {
 			continue
 		}
 
-		// Check for key:value pattern
 		if matches := keyValuePattern.FindStringSubmatch(line); matches != nil {
+			key := matches[1]
+			value := matches[2]
 			pairs = append(pairs, KeyValuePair{
-				Key:   matches[1],
-				Value: matches[2],
+				Key:      key,
+				Value:    value,
+				IsMasked: strings.HasPrefix(key, "."),
 			})
 			continue
 		}
 
-		// Check for markdown start (heading)
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			inKeyValueSection = false
 			remainingLines = append(remainingLines, line)
 			continue
 		}
 
-		// Empty line - stay in key-value section, don't add to pairs
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
-		// Non-key-value line - switch to markdown mode
 		inKeyValueSection = false
 		remainingLines = append(remainingLines, line)
 	}
@@ -241,6 +247,63 @@ type markdownContext struct {
 	inTable         bool
 	inTableHeader   bool
 	tableColumnIdx  int
+}
+
+func (ctx *markdownContext) appendTextNodeSpans(node *ast.Text, n ast.Node) {
+	content := string(node.Segment.Value(ctx.source))
+
+	weight := font.Normal
+	if ctx.inStrong || ctx.inHeading > 0 {
+		weight = font.Bold
+	}
+
+	size := unit.Sp(20)
+	if ctx.inHeading > 0 {
+		switch ctx.inHeading {
+		case 1:
+			size = unit.Sp(32)
+		case 2:
+			size = unit.Sp(28)
+		case 3:
+			size = unit.Sp(24)
+		default:
+			size = unit.Sp(22)
+		}
+	}
+
+	col := textColor
+	if ctx.inHeading > 0 {
+		col = headingColor
+	} else if ctx.inBlockquote {
+		col = blockquoteColor
+	} else if n.Parent() != nil && n.Parent().Kind() == ast.KindLink {
+		col = linkColor
+	} else if ctx.inStrikethrough {
+		col = strikethroughColor
+	} else if ctx.inTableHeader {
+		col = tableHeaderColor
+		weight = font.Bold
+	}
+
+	typeface := ctx.shaper
+	if ctx.inCode {
+		typeface = "monospace"
+	}
+
+	if node.SoftLineBreak() {
+		content += "\n"
+	}
+
+	*ctx.spans = append(*ctx.spans, richtext.SpanStyle{
+		Content: content,
+		Color:   col,
+		Size:    size,
+		Font: font.Font{
+			Typeface: typeface,
+			Weight:   weight,
+			Style:    font.Regular,
+		},
+	})
 }
 
 // visitor walks the markdown AST and builds richtext spans
@@ -464,65 +527,7 @@ func (ctx *markdownContext) visitor(n ast.Node, entering bool) (ast.WalkStatus, 
 
 	case *ast.Text:
 		if entering {
-			content := string(node.Segment.Value(ctx.source))
-
-			// Determine font weight and style
-			weight := font.Normal
-			if ctx.inStrong || ctx.inHeading > 0 {
-				weight = font.Bold
-			}
-
-			// Determine size based on heading level
-			size := unit.Sp(20)
-			if ctx.inHeading > 0 {
-				switch ctx.inHeading {
-				case 1:
-					size = unit.Sp(32)
-				case 2:
-					size = unit.Sp(28)
-				case 3:
-					size = unit.Sp(24)
-				default:
-					size = unit.Sp(22)
-				}
-			}
-
-			// Determine color
-			col := textColor
-			if ctx.inHeading > 0 {
-				col = headingColor
-			} else if ctx.inBlockquote {
-				col = blockquoteColor
-			} else if n.Parent() != nil && n.Parent().Kind() == ast.KindLink {
-				col = linkColor
-			} else if ctx.inStrikethrough {
-				col = strikethroughColor
-			} else if ctx.inTableHeader {
-				col = tableHeaderColor
-				weight = font.Bold
-			}
-
-			// Determine typeface
-			typeface := ctx.shaper
-			if ctx.inCode {
-				typeface = "monospace"
-			}
-
-			// Handle line breaks in text
-			if node.SoftLineBreak() {
-				content += "\n"
-			}
-
-			*ctx.spans = append(*ctx.spans, richtext.SpanStyle{
-				Content: content,
-				Color:   col,
-				Size:    size,
-				Font: font.Font{
-					Typeface: typeface,
-					Weight:   weight,
-					Style:    font.Regular,
-				},
-			})
+			ctx.appendTextNodeSpans(node, n)
 		}
 	}
 

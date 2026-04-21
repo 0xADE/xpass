@@ -3,6 +3,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -24,7 +25,7 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 
 	// Create subdirectories if they don't exist
 	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return "", fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -38,7 +39,7 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 		args = append(args, "--recipient", gpgID)
 	}
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.CommandContext(context.Background(), "gpg", args...) //nolint:gosec // G204: fixed gpg flags; paths under password store.
 	cmd.Stdin = strings.NewReader(content)
 
 	var stderr bytes.Buffer

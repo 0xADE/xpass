@@ -1,3 +1,10 @@
+PREFIX=/usr/local
+SUDO=sudo
+
+.PHONY: test
+test:
+	go test ./...
+
 .PHONY: build
 build:
 	mkdir -p build
@@ -25,4 +32,4 @@ tidy:
 
 .PHONY: install
 install: build
-	install ./build/xpass /usr/local/bin
+	$(SUDO) install ./build/xpass $(PREFIX)/bin

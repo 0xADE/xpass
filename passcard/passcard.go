@@ -4,6 +4,7 @@ package passcard
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"io"
 	"os"
@@ -29,7 +30,7 @@ func (p *StoredItem) decrypt() (string, error) {
 		}
 	}
 
-	cmd := exec.Command("gpg", "--decrypt", "--quiet", "--batch", p.Path)
+	cmd := exec.CommandContext(context.Background(), "gpg", "--decrypt", "--quiet", "--batch", p.Path) //nolint:gosec // G204: fixed argv; path from pass store.
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
