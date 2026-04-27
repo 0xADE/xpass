@@ -58,12 +58,13 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 type Subscriber func(status string)
 
 type Storage struct {
-	path        string
-	key         string
-	passwords   []passcard.StoredItem
-	subscribers []Subscriber
-	cache       map[string]string
-	cacheMutex  sync.RWMutex
+	path           string
+	key            string
+	passwords      []passcard.StoredItem
+	passwordsMutex sync.RWMutex
+	subscribers    []Subscriber
+	cache          map[string]string
+	cacheMutex     sync.RWMutex
 }
 
 func Init(basePath, key string) (*Storage, error) {
@@ -85,8 +86,13 @@ func (s *Storage) Path() string {
 }
 
 func (s *Storage) Query(query string) []passcard.StoredItem {
+	s.passwordsMutex.RLock()
+	defer s.passwordsMutex.RUnlock()
+
 	if query == "" {
-		return s.passwords
+		out := make([]passcard.StoredItem, len(s.passwords))
+		copy(out, s.passwords)
+		return out
 	}
 
 	var hits []passcard.StoredItem
@@ -110,6 +116,8 @@ func (s *Storage) Query(query string) []passcard.StoredItem {
 }
 
 func (s *Storage) NameByIdx(idx int) string {
+	s.passwordsMutex.RLock()
+	defer s.passwordsMutex.RUnlock()
 	if idx >= len(s.passwords) {
 		return ""
 	}
@@ -148,20 +156,37 @@ func (s *Storage) invalidateCache(path string) {
 }
 
 func (s *Storage) IndexAll() {
-	oldPaths := make(map[string]bool)
-	for _, p := range s.passwords {
-		oldPaths[p.Path] = true
+	var newPasswords []passcard.StoredItem
+	walkFn := func(path string, info os.FileInfo, err error) error {
+		if !strings.HasSuffix(path, ".gpg") {
+			return nil
+		}
+		name := strings.TrimPrefix(path, s.path)
+		name = strings.TrimSuffix(name, ".gpg")
+		name = strings.TrimPrefix(name, "/")
+		const MaxLen = 40
+		if len(name) > MaxLen {
+			name = "..." + name[len(name)-MaxLen:]
+		}
+		newPasswords = append(newPasswords, passcard.StoredItem{
+			Name:    name,
+			Path:    path,
+			Storage: s,
+		})
+		return nil
 	}
-
-	s.passwords = nil
-	if err := filepath.Walk(s.path, s.index); err != nil {
+	if err := filepath.Walk(s.path, walkFn); err != nil {
 		return
 	}
 
 	newPaths := make(map[string]bool)
-	for _, p := range s.passwords {
+	for _, p := range newPasswords {
 		newPaths[p.Path] = true
 	}
+
+	s.passwordsMutex.Lock()
+	s.passwords = newPasswords
+	s.passwordsMutex.Unlock()
 
 	s.cacheMutex.Lock()
 	for path := range s.cache {
@@ -171,25 +196,7 @@ func (s *Storage) IndexAll() {
 	}
 	s.cacheMutex.Unlock()
 
-	s.publishUpdate(fmt.Sprintf("Indexed %d pass entries", len(s.passwords)))
-}
-
-func (s *Storage) index(path string, info os.FileInfo, err error) error {
-	if strings.HasSuffix(path, ".gpg") {
-		name := strings.TrimPrefix(path, s.path)
-		name = strings.TrimSuffix(name, ".gpg")
-		name = strings.TrimPrefix(name, "/")
-		const MaxLen = 40
-		if len(name) > MaxLen {
-			name = "..." + name[len(name)-MaxLen:]
-		}
-		s.passwords = append(s.passwords, passcard.StoredItem{
-			Name:    name,
-			Path:    path,
-			Storage: s,
-		})
-	}
-	return nil
+	s.publishUpdate(fmt.Sprintf("Indexed %d pass entries", len(newPasswords)))
 }
 
 func (s *Storage) watch() {

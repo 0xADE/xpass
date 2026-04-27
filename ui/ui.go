@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"0xADE/xpass/config"
@@ -81,8 +82,10 @@ type UI struct {
 
 	// Filter debouncing
 	queryInput   chan string
-	queryResults chan []passcard.StoredItem
+	queryResults chan debouncedFilterResult
 	stopFilter   chan struct{}
+
+	pendingStorageRefresh atomic.Bool
 
 	// Key repeat handling
 	keyRepeatActive bool
@@ -105,6 +108,11 @@ type UI struct {
 	lastPersistedKey string
 }
 
+type debouncedFilterResult struct {
+	query string
+	items []passcard.StoredItem
+}
+
 func New(store *storage.Storage, cfg *config.Config) *UI {
 	ui := &UI{
 		storage:       store,
@@ -117,7 +125,7 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		lastMetadataItemIdx: -1, // Force initial update
 		fieldWidgets:        make(map[string]*fieldWidget),
 		queryInput:          make(chan string, 64),
-		queryResults:        make(chan []passcard.StoredItem, 1),
+		queryResults:        make(chan debouncedFilterResult, 1),
 		stopFilter:          make(chan struct{}),
 		decryptFailed:       make(map[string]bool),
 	}
@@ -146,7 +154,7 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 		ui.statusMutex.Lock()
 		ui.status = status
 		ui.statusMutex.Unlock()
-		ui.updateQuery()
+		ui.pendingStorageRefresh.Store(true)
 		if ui.window != nil {
 			ui.window.Invalidate()
 		}
@@ -216,7 +224,7 @@ func (ui *UI) startFilterWorker() {
 				timer = time.AfterFunc(debounceDelay, func() {
 					filtered := ui.storage.Query(latestQuery)
 					select {
-					case ui.queryResults <- filtered:
+					case ui.queryResults <- debouncedFilterResult{query: latestQuery, items: filtered}:
 						if ui.window != nil {
 							ui.window.Invalidate()
 						}
@@ -234,10 +242,72 @@ func (ui *UI) startFilterWorker() {
 	}()
 }
 
-func (ui *UI) updateQuery() {
-	ui.filtered = ui.storage.Query(ui.query)
+func (ui *UI) selectedPath() string {
+	if ui.selectedIdx < 0 || ui.selectedIdx >= len(ui.filtered) {
+		return ""
+	}
+	return ui.filtered[ui.selectedIdx].Path
+}
+
+func (ui *UI) reselectAfterFilterChange(preferredPath string) {
+	if preferredPath != "" {
+		for i, it := range ui.filtered {
+			if it.Path == preferredPath {
+				ui.selectedIdx = i
+				return
+			}
+		}
+		ui.selectedIdx = 0
+		return
+	}
 	if ui.selectedIdx >= len(ui.filtered) {
 		ui.selectedIdx = 0
+	}
+}
+
+func (ui *UI) ensureSelectedVisible() {
+	if len(ui.filtered) == 0 {
+		ui.list.Position.First = 0
+		return
+	}
+	if ui.selectedIdx < 0 {
+		ui.selectedIdx = 0
+	}
+	if ui.selectedIdx >= len(ui.filtered) {
+		ui.selectedIdx = len(ui.filtered) - 1
+	}
+	if ui.list.Position.First > ui.selectedIdx {
+		ui.list.Position.First = ui.selectedIdx
+	}
+	if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
+		ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
+	}
+}
+
+func (ui *UI) refreshFilteredList(preferredPath string) {
+	ui.filtered = ui.storage.Query(ui.query)
+	ui.reselectAfterFilterChange(preferredPath)
+	ui.ensureSelectedVisible()
+}
+
+func (ui *UI) applyDebouncedFilterResultIfCurrent(res debouncedFilterResult) bool {
+	if res.query != ui.query {
+		return false
+	}
+	preferred := ui.selectedPath()
+	ui.filtered = res.items
+	ui.reselectAfterFilterChange(preferred)
+	ui.ensureSelectedVisible()
+	return true
+}
+
+func (ui *UI) updateQuery() {
+	ui.refreshFilteredList(ui.selectedPath())
+}
+
+func (ui *UI) flushPendingStorageRefresh() {
+	if ui.pendingStorageRefresh.CompareAndSwap(true, false) {
+		ui.updateQuery()
 	}
 }
 
@@ -518,7 +588,9 @@ func (ui *UI) saveEditMode() {
 
 	// Force re-extract kvPairs
 	ui.lastMetadataItemIdx = -1
-	ui.updateQuery()
+	savedPath := item.Path
+	ui.refreshFilteredList(savedPath)
+	ui.persistLatestSelection()
 
 	// Request focus back to search editor
 	if ui.window != nil {
@@ -598,19 +670,10 @@ func (ui *UI) createNewPassword() {
 	ui.statusMutex.Unlock()
 
 	// The watcher in storage should have updated the list.
-	// We call updateQuery to be safe and to get the new list immediately.
-	ui.updateQuery()
+	// We call refreshFilteredList to be safe and to get the new list immediately.
+	ui.refreshFilteredList(fullPath)
 
-	found := false
-	for i, item := range ui.filtered {
-		if item.Path == fullPath {
-			ui.selectedIdx = i
-			found = true
-			break
-		}
-	}
-
-	if found {
+	if ui.selectedPath() == fullPath {
 		ui.enterEditMode()
 		ui.persistLatestSelection()
 	} else {
@@ -825,15 +888,15 @@ func (ui *UI) loop() error {
 
 			// Process filter results
 			select {
-			case filtered := <-ui.queryResults:
-				ui.filtered = filtered
-				if ui.selectedIdx >= len(ui.filtered) {
-					ui.selectedIdx = 0
+			case res := <-ui.queryResults:
+				if ui.applyDebouncedFilterResultIfCurrent(res) {
+					ui.persistLatestSelection()
 				}
-				ui.persistLatestSelection()
 			default:
 				// No results ready
 			}
+
+			ui.flushPendingStorageRefresh()
 
 			if !ui.initialized {
 				gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
@@ -963,6 +1026,8 @@ func (ui *UI) loop() error {
 					}
 				}
 			}
+
+			ui.flushPendingStorageRefresh()
 
 			ui.layout(gtx)
 			area.Pop()
