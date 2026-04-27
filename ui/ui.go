@@ -100,6 +100,9 @@ type UI struct {
 	createMode   bool
 	createEditor widget.Editor
 	addButton    widget.Clickable
+
+	// Latest selection cache (dedupe writes)
+	lastPersistedKey string
 }
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
@@ -131,6 +134,14 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	ui.createEditor.SingleLine = true
 	ui.createEditor.Submit = true
 
+	restored, _ := loadLatestSelectionFromCache(time.Now())
+	var restoredPath string
+	if restored != nil {
+		restoredPath = restored.Path
+		ui.query = restored.Query
+		ui.searchEditor.SetText(restored.Query)
+	}
+
 	store.Subscribe(func(status string) {
 		ui.statusMutex.Lock()
 		ui.status = status
@@ -142,8 +153,51 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	})
 
 	ui.updateQuery()
-	ui.startFilterWorker()
+
+	if restoredPath != "" {
+		found := false
+		for i, item := range ui.filtered {
+			if item.Path == restoredPath {
+				ui.selectedIdx = i
+				found = true
+				break
+			}
+		}
+		if found {
+			ui.list.Position.First = ui.selectedIdx
+			ui.lastPersistedKey = ui.query + "\x00" + restoredPath
+		} else {
+			ui.query = ""
+			ui.searchEditor.SetText("")
+			ui.selectedIdx = 0
+			ui.list.Position.First = 0
+			ui.updateQuery()
+		}
+	}
+
+	select {
+	case ui.queryInput <- ui.query:
+	default:
+	}
+
 	return ui
+}
+
+func (ui *UI) persistLatestSelection() {
+	if ui.selectedIdx < 0 || ui.selectedIdx >= len(ui.filtered) {
+		return
+	}
+	path := ui.filtered[ui.selectedIdx].Path
+	key := ui.query + "\x00" + path
+	if key == ui.lastPersistedKey {
+		return
+	}
+	ui.lastPersistedKey = key
+	_ = saveLatestSelectionToCache(latestSelection{
+		SavedAt: time.Now(),
+		Query:   ui.query,
+		Path:    path,
+	})
 }
 
 func (ui *UI) startFilterWorker() {
@@ -194,6 +248,7 @@ func (ui *UI) moveSelectionUp() {
 			ui.list.Position.First = ui.selectedIdx
 		}
 	}
+	ui.persistLatestSelection()
 }
 
 func (ui *UI) moveSelectionDown() {
@@ -203,6 +258,7 @@ func (ui *UI) moveSelectionDown() {
 			ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
 		}
 	}
+	ui.persistLatestSelection()
 }
 
 func (ui *UI) copyToClipboard() {
@@ -556,6 +612,7 @@ func (ui *UI) createNewPassword() {
 
 	if found {
 		ui.enterEditMode()
+		ui.persistLatestSelection()
 	} else {
 		ui.statusMutex.Lock()
 		ui.status = "Could not select new password"
@@ -652,6 +709,7 @@ func (ui *UI) handleGlobalKeyPress(gtx layout.Context, kev key.Event) {
 		} else if ui.editMode {
 			ui.cancelEditMode()
 		} else {
+			ui.persistLatestSelection()
 			os.Exit(0)
 		}
 	case key.NameUpArrow:
@@ -738,6 +796,7 @@ func (ui *UI) Run() error {
 	ui.window = new(app.Window)
 	ui.window.Option(app.Title("xpass"))
 	ui.window.Option(app.Size(unit.Dp(1080), unit.Dp(920)))
+	ui.startFilterWorker()
 
 	go func() {
 		if err := ui.loop(); err != nil {
@@ -757,6 +816,7 @@ func (ui *UI) loop() error {
 	for {
 		switch e := ui.window.Event().(type) {
 		case app.DestroyEvent:
+			ui.persistLatestSelection()
 			close(ui.stopFilter)
 			return e.Err
 
@@ -770,6 +830,7 @@ func (ui *UI) loop() error {
 				if ui.selectedIdx >= len(ui.filtered) {
 					ui.selectedIdx = 0
 				}
+				ui.persistLatestSelection()
 			default:
 				// No results ready
 			}
