@@ -89,3 +89,21 @@ func TestExtractKeyValuePairs_empty(t *testing.T) {
 		t.Fatalf("pairs=%v rest=%q", pairs, rest)
 	}
 }
+
+func TestDisplayFieldName(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"email", "Email"},
+		{".secret", "Secret"},
+		{"e-mail", "E-Mail"},
+		{"", ""},
+		{".", ""},
+	}
+	for _, tt := range tests {
+		if got := displayFieldName(tt.raw); got != tt.want {
+			t.Errorf("displayFieldName(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+}

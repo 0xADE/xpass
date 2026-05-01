@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"gioui.org/font"
 	"gioui.org/unit"
 	"gioui.org/x/richtext"
@@ -32,6 +35,18 @@ var (
 
 // Key-value pattern: word(s) without spaces or colons, followed by colon
 var keyValuePattern = regexp.MustCompile(`^([^\s:]+):\s*(.*)$`)
+
+var fieldNameTitleCaser = cases.Title(language.Und)
+
+// displayFieldName formats a KV key for status messages: strips one leading '.'
+// from masked keys, then applies Unicode title casing.
+func displayFieldName(raw string) string {
+	s := strings.TrimPrefix(raw, ".")
+	if s == "" {
+		return ""
+	}
+	return fieldNameTitleCaser.String(s)
+}
 
 // KeyValuePair represents a single key-value field.
 // IsMasked is true when the key starts with "."; such values are rendered masked

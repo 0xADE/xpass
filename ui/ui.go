@@ -38,8 +38,9 @@ import (
 )
 
 const (
-	statusWrongKeyRetry  = "Wrong key. Press Ctrl+R to retry"
-	msgPressEnterDecrypt = "Press Enter to decrypt"
+	statusWrongKeyRetry    = "Wrong key. Press Ctrl+R to retry"
+	msgPressEnterDecrypt   = "Press Enter to decrypt"
+	clipboardLabelPassword = "Password"
 )
 
 type fieldWidget struct {
@@ -49,21 +50,23 @@ type fieldWidget struct {
 }
 
 type UI struct {
-	storage       *storage.Storage
-	config        *config.Config
-	theme         *material.Theme
-	window        *app.Window
-	searchEditor  widget.Editor
-	list          widget.List
-	query         string
-	filtered      []passcard.StoredItem
-	selectedIdx   int
-	status        string
-	countingDown  bool
-	countdown     float32
-	countdownDone chan bool
-	statusMutex   sync.RWMutex
-	decryptFailed map[string]bool
+	storage      *storage.Storage
+	config       *config.Config
+	theme        *material.Theme
+	window       *app.Window
+	searchEditor widget.Editor
+	list         widget.List
+	query        string
+	filtered     []passcard.StoredItem
+	selectedIdx  int
+	status       string
+	// clipboardSourceDisplay is the title-case style label for status during clipboard countdown (e.g. Password, Email).
+	clipboardSourceDisplay string
+	countingDown           bool
+	countdown              float32
+	countdownDone          chan bool
+	statusMutex            sync.RWMutex
+	decryptFailed          map[string]bool
 
 	initialized          bool
 	metadataState        richtext.InteractiveText
@@ -362,39 +365,50 @@ func (ui *UI) copyToClipboard() {
 		return
 	}
 
+	ui.clipboardSourceDisplay = clipboardLabelPassword
 	ui.setStatus("Copied to clipboard")
 	go ui.clearClipboard()
 }
 
-func (ui *UI) copyFieldToClipboard(value string) {
+func (ui *UI) copyFieldToClipboard(value, displayName string) {
 	if err := clipboard.WriteAll(value); err != nil {
 		ui.setStatus(fmt.Sprintf("Failed to copy: %v", err))
 		return
 	}
 
+	ui.clipboardSourceDisplay = displayName
 	ui.setStatus("Copied to clipboard")
 	go ui.clearClipboard()
 }
 
 func (ui *UI) findFieldValue(keys ...string) string {
+	v, _ := ui.findFieldValueWithKey(keys...)
+	return v
+}
+
+func (ui *UI) findFieldValueWithKey(keys ...string) (value, matchedKey string) {
 	for _, key := range keys {
 		keyLower := strings.ToLower(key)
 		for _, pair := range ui.kvPairs {
 			if strings.ToLower(pair.Key) == keyLower {
-				return pair.Value
+				return pair.Value, pair.Key
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func (ui *UI) copyFieldByKeys(keys ...string) {
-	value := ui.findFieldValue(keys...)
+	value, matchedKey := ui.findFieldValueWithKey(keys...)
 	if value == "" {
 		ui.setStatus(fmt.Sprintf("Field not found: %v", keys))
 		return
 	}
-	ui.copyFieldToClipboard(value)
+	label := displayFieldName(matchedKey)
+	if label == "" {
+		label = clipboardLabelPassword
+	}
+	ui.copyFieldToClipboard(value, label)
 }
 
 // getDecryptedContent returns decrypted content if available. On the
@@ -673,7 +687,11 @@ func (ui *UI) clearClipboard() {
 		case <-ticker.C:
 			ui.statusMutex.Lock()
 			ui.countdown = float32(remaining / float64(ui.config.PasswordStoreClipSeconds))
-			ui.status = fmt.Sprintf("Will clear %s in %.0f seconds", ui.storage.NameByIdx(ui.selectedIdx), remaining)
+			label := ui.clipboardSourceDisplay
+			if label == "" {
+				label = clipboardLabelPassword
+			}
+			ui.status = fmt.Sprintf("%s copied. Will clear %s in %.0f sec", label, ui.storage.NameByIdx(ui.selectedIdx), remaining)
 			ui.statusMutex.Unlock()
 			if ui.window != nil {
 				ui.window.Invalidate()
@@ -709,7 +727,7 @@ func (ui *UI) copyMetadataSelectionToClipboard() {
 	if start >= len(text) || end > len(text) {
 		return
 	}
-	ui.copyFieldToClipboard(text[start:end])
+	ui.copyFieldToClipboard(text[start:end], "Selection")
 }
 
 func (ui *UI) handleGlobalKeyboardEvent(gtx layout.Context, kev key.Event) {
@@ -1452,11 +1470,11 @@ func (ui *UI) layoutKeyValueField(gtx layout.Context, pair KeyValuePair) layout.
 	}
 
 	if fw.labelClickable.Clicked(gtx) {
-		ui.copyFieldToClipboard(pair.Value)
+		ui.copyFieldToClipboard(pair.Value, displayFieldName(pair.Key))
 	}
 
 	if fw.clickable.Clicked(gtx) {
-		ui.copyFieldToClipboard(pair.Value)
+		ui.copyFieldToClipboard(pair.Value, displayFieldName(pair.Key))
 	}
 
 	labelColor := color.NRGBA{R: 238, G: 238, B: 238, A: 255}
@@ -1539,12 +1557,12 @@ func (ui *UI) layoutPasswordField(gtx layout.Context, password string) layout.Di
 
 	// Handle clicks on label
 	if fw.labelClickable.Clicked(gtx) {
-		ui.copyFieldToClipboard(password)
+		ui.copyFieldToClipboard(password, clipboardLabelPassword)
 	}
 
 	// Handle clicks on input widget
 	if fw.clickable.Clicked(gtx) {
-		ui.copyFieldToClipboard(password)
+		ui.copyFieldToClipboard(password, clipboardLabelPassword)
 	}
 
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
