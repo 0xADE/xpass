@@ -151,9 +151,7 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	}
 
 	store.Subscribe(func(status string) {
-		ui.statusMutex.Lock()
-		ui.status = status
-		ui.statusMutex.Unlock()
+		ui.setStatus(status)
 		ui.pendingStorageRefresh.Store(true)
 		if ui.window != nil {
 			ui.window.Invalidate()
@@ -189,6 +187,12 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 	}
 
 	return ui
+}
+
+func (ui *UI) setStatus(msg string) {
+	ui.statusMutex.Lock()
+	ui.status = msg
+	ui.statusMutex.Unlock()
 }
 
 func (ui *UI) persistLatestSelection() {
@@ -333,9 +337,7 @@ func (ui *UI) moveSelectionDown() {
 
 func (ui *UI) copyToClipboard() {
 	if ui.selectedIdx >= len(ui.filtered) {
-		ui.statusMutex.Lock()
-		ui.status = "No password selected"
-		ui.statusMutex.Unlock()
+		ui.setStatus("No password selected")
 		return
 	}
 
@@ -351,36 +353,26 @@ func (ui *UI) copyToClipboard() {
 		pass = strings.TrimSpace(lines[0])
 	}
 	if pass == "" {
-		ui.statusMutex.Lock()
-		ui.status = "No password found"
-		ui.statusMutex.Unlock()
+		ui.setStatus("No password found")
 		return
 	}
 
 	if err := clipboard.WriteAll(pass); err != nil {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Failed to copy: %v", err)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Failed to copy: %v", err))
 		return
 	}
 
-	ui.statusMutex.Lock()
-	ui.status = "Copied to clipboard"
-	ui.statusMutex.Unlock()
+	ui.setStatus("Copied to clipboard")
 	go ui.clearClipboard()
 }
 
 func (ui *UI) copyFieldToClipboard(value string) {
 	if err := clipboard.WriteAll(value); err != nil {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Failed to copy: %v", err)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Failed to copy: %v", err))
 		return
 	}
 
-	ui.statusMutex.Lock()
-	ui.status = "Copied to clipboard"
-	ui.statusMutex.Unlock()
+	ui.setStatus("Copied to clipboard")
 	go ui.clearClipboard()
 }
 
@@ -399,9 +391,7 @@ func (ui *UI) findFieldValue(keys ...string) string {
 func (ui *UI) copyFieldByKeys(keys ...string) {
 	value := ui.findFieldValue(keys...)
 	if value == "" {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Field not found: %v", keys)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Field not found: %v", keys))
 		return
 	}
 	ui.copyFieldToClipboard(value)
@@ -424,9 +414,7 @@ func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
 
 	// If a previous attempt failed, avoid re-prompting
 	if ui.decryptFailed[item.Path] {
-		ui.statusMutex.Lock()
-		ui.status = statusWrongKeyRetry
-		ui.statusMutex.Unlock()
+		ui.setStatus(statusWrongKeyRetry)
 		return "", fmt.Errorf("decrypt previously failed")
 	}
 
@@ -434,9 +422,7 @@ func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
 	decrypted, err := item.Decrypt()
 	if err != nil {
 		ui.decryptFailed[item.Path] = true
-		ui.statusMutex.Lock()
-		ui.status = statusWrongKeyRetry
-		ui.statusMutex.Unlock()
+		ui.setStatus(statusWrongKeyRetry)
 		if ui.window != nil {
 			ui.window.Invalidate()
 		}
@@ -463,9 +449,7 @@ func (ui *UI) retryDecryptSelected() {
 	}
 
 	if decrypted != "" {
-		ui.statusMutex.Lock()
-		ui.status = "Decrypted"
-		ui.statusMutex.Unlock()
+		ui.setStatus("Decrypted")
 	}
 
 	if ui.window != nil {
@@ -475,23 +459,17 @@ func (ui *UI) retryDecryptSelected() {
 
 func (ui *UI) openURL(url string) {
 	if url == "" {
-		ui.statusMutex.Lock()
-		ui.status = "No URL found"
-		ui.statusMutex.Unlock()
+		ui.setStatus("No URL found")
 		return
 	}
 
 	cmd := exec.CommandContext(context.Background(), "xdg-open", url)
 	if err := cmd.Start(); err != nil {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Failed to open URL: %v", err)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Failed to open URL: %v", err))
 		return
 	}
 
-	ui.statusMutex.Lock()
-	ui.status = fmt.Sprintf("Opening %s", url)
-	ui.statusMutex.Unlock()
+	ui.setStatus(fmt.Sprintf("Opening %s", url))
 }
 
 func (ui *UI) enterEditMode() {
@@ -508,9 +486,7 @@ func (ui *UI) enterEditMode() {
 	// Decrypt to get full content
 	decrypted, ok := item.Storage.GetCached(item.Path)
 	if !ok || decrypted == "" {
-		ui.statusMutex.Lock()
-		ui.status = "Cannot edit: decrypt first"
-		ui.statusMutex.Unlock()
+		ui.setStatus("Cannot edit: decrypt first")
 		fmt.Println("DEBUG: Cannot edit - not decrypted")
 		return
 	}
@@ -545,9 +521,7 @@ func (ui *UI) saveEditMode() {
 	gpgIDs := ui.getGPGRecipients()
 
 	if len(gpgIDs) == 0 {
-		ui.statusMutex.Lock()
-		ui.status = "No GPG key configured"
-		ui.statusMutex.Unlock()
+		ui.setStatus("No GPG key configured")
 		fmt.Println("DEBUG: No GPG key configured")
 		return
 	}
@@ -568,9 +542,7 @@ func (ui *UI) saveEditMode() {
 
 	fmt.Printf("DEBUG: Running GPG command: gpg %v\n", args)
 	if err := cmd.Run(); err != nil {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Failed to save: %v", err)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Failed to save: %v", err))
 		fmt.Printf("DEBUG: GPG error: %v\nStderr: %s\n", err, stderr.String())
 		return
 	}
@@ -582,9 +554,7 @@ func (ui *UI) saveEditMode() {
 	}
 
 	ui.editMode = false
-	ui.statusMutex.Lock()
-	ui.status = "Saved successfully"
-	ui.statusMutex.Unlock()
+	ui.setStatus("Saved successfully")
 
 	// Force re-extract kvPairs
 	ui.lastMetadataItemIdx = -1
@@ -600,9 +570,7 @@ func (ui *UI) saveEditMode() {
 
 func (ui *UI) cancelEditMode() {
 	ui.editMode = false
-	ui.statusMutex.Lock()
-	ui.status = "Edit canceled"
-	ui.statusMutex.Unlock()
+	ui.setStatus("Edit canceled")
 
 	// Request focus back to search editor
 	if ui.window != nil {
@@ -643,31 +611,25 @@ func (ui *UI) getGPGRecipients() []string {
 func (ui *UI) createNewPassword() {
 	name := ui.createEditor.Text()
 	if name == "" {
-		ui.status = "Password name cannot be empty"
+		ui.setStatus("Password name cannot be empty")
 		return
 	}
 	name = strings.TrimSuffix(name, ".gpg")
 
 	gpgIDs := ui.getGPGRecipients()
 	if len(gpgIDs) == 0 {
-		ui.statusMutex.Lock()
-		ui.status = "No GPG key configured"
-		ui.statusMutex.Unlock()
+		ui.setStatus("No GPG key configured")
 		return
 	}
 
 	fullPath, err := ui.storage.Create(name, "\n", gpgIDs)
 	if err != nil {
-		ui.statusMutex.Lock()
-		ui.status = fmt.Sprintf("Failed to create: %v", err)
-		ui.statusMutex.Unlock()
+		ui.setStatus(fmt.Sprintf("Failed to create: %v", err))
 		return
 	}
 
 	ui.createMode = false
-	ui.statusMutex.Lock()
-	ui.status = "Created successfully"
-	ui.statusMutex.Unlock()
+	ui.setStatus("Created successfully")
 
 	// The watcher in storage should have updated the list.
 	// We call refreshFilteredList to be safe and to get the new list immediately.
@@ -677,9 +639,7 @@ func (ui *UI) createNewPassword() {
 		ui.enterEditMode()
 		ui.persistLatestSelection()
 	} else {
-		ui.statusMutex.Lock()
-		ui.status = "Could not select new password"
-		ui.statusMutex.Unlock()
+		ui.setStatus("Could not select new password")
 	}
 }
 
@@ -819,9 +779,7 @@ func (ui *UI) handleGlobalKeyPress(gtx layout.Context, kev key.Event) {
 			if url != "" {
 				ui.openURL(url)
 			} else {
-				ui.statusMutex.Lock()
-				ui.status = "No URL found"
-				ui.statusMutex.Unlock()
+				ui.setStatus("No URL found")
 			}
 		}
 	case "M":
@@ -1164,9 +1122,7 @@ func (ui *UI) layoutEditModeButtons(gtx layout.Context) layout.Dimensions {
 				// Only password, replace it
 				ui.editModeEditor.SetText(newPassword)
 			}
-			ui.statusMutex.Lock()
-			ui.status = "Password generated"
-			ui.statusMutex.Unlock()
+			ui.setStatus("Password generated")
 		}
 	}
 	for ui.saveButton.Clicked(gtx) {
