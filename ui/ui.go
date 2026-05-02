@@ -40,6 +40,7 @@ import (
 const (
 	statusWrongKeyRetry    = "Wrong key. Press Ctrl+R to retry"
 	msgPressEnterDecrypt   = "Press Enter to decrypt"
+	msgAddNewRecord        = "<Add new record. Press Ctrl+Enter>"
 	clipboardLabelPassword = "Password"
 )
 
@@ -96,16 +97,15 @@ type UI struct {
 	keyRepeatStart  time.Time
 
 	// Edit mode
-	editMode       bool
-	editModeEditor widget.Editor
-	modifyButton   widget.Clickable
-	saveButton     widget.Clickable
-	cancelButton   widget.Clickable
-	passgenButton  widget.Clickable
-	// Create mode
-	createMode   bool
-	createEditor widget.Editor
-	addButton    widget.Clickable
+	editMode        bool
+	isNewCard       bool
+	editModeEditor  widget.Editor
+	modifyButton    widget.Clickable
+	saveButton      widget.Clickable
+	cancelButton    widget.Clickable
+	passgenButton   widget.Clickable
+	addButton       widget.Clickable
+	addRowClickable widget.Clickable
 
 	// Latest selection cache (dedupe writes)
 	lastPersistedKey string
@@ -141,9 +141,6 @@ func New(store *storage.Storage, cfg *config.Config) *UI {
 
 	ui.editModeEditor.SingleLine = false
 	ui.editModeEditor.ReadOnly = false
-
-	ui.createEditor.SingleLine = true
-	ui.createEditor.Submit = true
 
 	restored, _ := loadLatestSelectionFromCache(time.Now())
 	var restoredPath string
@@ -198,7 +195,21 @@ func (ui *UI) setStatus(msg string) {
 	ui.statusMutex.Unlock()
 }
 
+func (ui *UI) showAddRow() bool {
+	return len(ui.filtered) == 0 && strings.TrimSpace(ui.query) != ""
+}
+
+func (ui *UI) listRowCount() int {
+	if ui.showAddRow() {
+		return 1
+	}
+	return len(ui.filtered)
+}
+
 func (ui *UI) persistLatestSelection() {
+	if ui.showAddRow() {
+		return
+	}
 	if ui.selectedIdx < 0 || ui.selectedIdx >= len(ui.filtered) {
 		return
 	}
@@ -273,15 +284,16 @@ func (ui *UI) reselectAfterFilterChange(preferredPath string) {
 }
 
 func (ui *UI) ensureSelectedVisible() {
-	if len(ui.filtered) == 0 {
+	n := ui.listRowCount()
+	if n == 0 {
 		ui.list.Position.First = 0
 		return
 	}
 	if ui.selectedIdx < 0 {
 		ui.selectedIdx = 0
 	}
-	if ui.selectedIdx >= len(ui.filtered) {
-		ui.selectedIdx = len(ui.filtered) - 1
+	if ui.selectedIdx >= n {
+		ui.selectedIdx = n - 1
 	}
 	if ui.list.Position.First > ui.selectedIdx {
 		ui.list.Position.First = ui.selectedIdx
@@ -319,6 +331,10 @@ func (ui *UI) flushPendingStorageRefresh() {
 }
 
 func (ui *UI) moveSelectionUp() {
+	n := ui.listRowCount()
+	if n == 0 {
+		return
+	}
 	if ui.selectedIdx > 0 {
 		ui.selectedIdx--
 		if ui.list.Position.First > ui.selectedIdx {
@@ -329,7 +345,8 @@ func (ui *UI) moveSelectionUp() {
 }
 
 func (ui *UI) moveSelectionDown() {
-	if ui.selectedIdx < len(ui.filtered)-1 {
+	n := ui.listRowCount()
+	if ui.selectedIdx < n-1 {
 		ui.selectedIdx++
 		if ui.list.Position.Count > 0 && ui.list.Position.First+ui.list.Position.Count <= ui.selectedIdx {
 			ui.list.Position.First = ui.selectedIdx - ui.list.Position.Count + 1
@@ -450,6 +467,9 @@ func (ui *UI) getDecryptedContent(item passcard.StoredItem) (string, error) {
 // retryDecryptSelected clears the failure marker and performs a single retry
 // for the currently selected item.
 func (ui *UI) retryDecryptSelected() {
+	if ui.showAddRow() {
+		return
+	}
 	if ui.selectedIdx >= len(ui.filtered) {
 		return
 	}
@@ -487,31 +507,27 @@ func (ui *UI) openURL(url string) {
 }
 
 func (ui *UI) enterEditMode() {
-	fmt.Println("DEBUG: enterEditMode() called")
 	if ui.selectedIdx >= len(ui.filtered) {
-		fmt.Println("DEBUG: selectedIdx out of range")
 		return
 	}
 
-	// Get the current item
-	item := ui.filtered[ui.selectedIdx]
-	fmt.Printf("DEBUG: Entering edit mode for: %s\n", item.Name)
+	ui.isNewCard = false
 
-	// Decrypt to get full content
+	item := ui.filtered[ui.selectedIdx]
+
 	decrypted, ok := item.Storage.GetCached(item.Path)
 	if !ok || decrypted == "" {
-		ui.setStatus("Cannot edit: decrypt first")
-		fmt.Println("DEBUG: Cannot edit - not decrypted")
-		return
+		var err error
+		decrypted, err = ui.getDecryptedContent(item)
+		if err != nil || decrypted == "" {
+			ui.setStatus("Cannot edit: decrypt first")
+			return
+		}
 	}
-	fmt.Printf("DEBUG: Decrypted content length: %d\n", len(decrypted))
 
-	// Set editor text to full content (password + metadata)
 	ui.editModeEditor.SetText(decrypted)
 	ui.editMode = true
-	fmt.Println("DEBUG: Edit mode activated successfully")
 
-	// Request focus for edit mode editor on next frame
 	if ui.window != nil {
 		ui.window.Invalidate()
 	}
@@ -568,6 +584,7 @@ func (ui *UI) saveEditMode() {
 	}
 
 	ui.editMode = false
+	ui.isNewCard = false
 	ui.setStatus("Saved successfully")
 
 	// Force re-extract kvPairs
@@ -583,13 +600,38 @@ func (ui *UI) saveEditMode() {
 }
 
 func (ui *UI) cancelEditMode() {
-	ui.editMode = false
-	ui.setStatus("Edit canceled")
+	if ui.isNewCard {
+		if !ui.tryCancelNewCardCreation() {
+			if ui.window != nil {
+				ui.window.Invalidate()
+			}
+			return
+		}
+	} else {
+		ui.setStatus("Edit canceled")
+	}
 
-	// Request focus back to search editor
+	ui.editMode = false
 	if ui.window != nil {
 		ui.window.Invalidate()
 	}
+}
+
+func (ui *UI) tryCancelNewCardCreation() bool {
+	if ui.selectedIdx < 0 || ui.selectedIdx >= len(ui.filtered) {
+		ui.isNewCard = false
+		return true
+	}
+	item := ui.filtered[ui.selectedIdx]
+	if err := ui.storage.Delete(item.Path); err != nil {
+		ui.setStatus(fmt.Sprintf("Failed to delete new card: %v", err))
+		return false
+	}
+	ui.setStatus("Canceled new card creation")
+	ui.lastMetadataItemIdx = -1
+	ui.updateQuery()
+	ui.isNewCard = false
+	return true
 }
 
 func (ui *UI) getGPGRecipients() []string {
@@ -622,8 +664,12 @@ func (ui *UI) getGPGRecipients() []string {
 	return gpgIDs
 }
 
-func (ui *UI) createNewPassword() {
-	name := ui.createEditor.Text()
+func (ui *UI) createFromFilter() {
+	if !ui.showAddRow() {
+		return
+	}
+	name := strings.TrimSpace(ui.searchEditor.Text())
+	ui.query = ui.searchEditor.Text()
 	if name == "" {
 		ui.setStatus("Password name cannot be empty")
 		return
@@ -642,18 +688,19 @@ func (ui *UI) createNewPassword() {
 		return
 	}
 
-	ui.createMode = false
 	ui.setStatus("Created successfully")
 
-	// The watcher in storage should have updated the list.
-	// We call refreshFilteredList to be safe and to get the new list immediately.
 	ui.refreshFilteredList(fullPath)
 
 	if ui.selectedPath() == fullPath {
 		ui.enterEditMode()
+		ui.isNewCard = true
 		ui.persistLatestSelection()
 	} else {
 		ui.setStatus("Could not select new password")
+	}
+	if ui.window != nil {
+		ui.window.Invalidate()
 	}
 }
 
@@ -691,7 +738,14 @@ func (ui *UI) clearClipboard() {
 			if label == "" {
 				label = clipboardLabelPassword
 			}
-			ui.status = fmt.Sprintf("%s copied. Will clear %s in %.0f sec", label, ui.storage.NameByIdx(ui.selectedIdx), remaining)
+			entryLabel := ""
+			if ui.selectedIdx >= 0 && ui.selectedIdx < len(ui.filtered) {
+				entryLabel = ui.filtered[ui.selectedIdx].Name
+			}
+			if entryLabel == "" {
+				entryLabel = "entry"
+			}
+			ui.status = fmt.Sprintf("%s copied. Will clear %s in %.0f sec", label, entryLabel, remaining)
 			ui.statusMutex.Unlock()
 			if ui.window != nil {
 				ui.window.Invalidate()
@@ -730,10 +784,10 @@ func (ui *UI) copyMetadataSelectionToClipboard() {
 	ui.copyFieldToClipboard(text[start:end], "Selection")
 }
 
-func (ui *UI) handleGlobalKeyboardEvent(gtx layout.Context, kev key.Event) {
+func (ui *UI) handleGlobalKeyboardEvent(kev key.Event) {
 	switch kev.State {
 	case key.Press:
-		ui.handleGlobalKeyPress(gtx, kev)
+		ui.handleGlobalKeyPress(kev)
 	case key.Release:
 		if ui.keyRepeatActive && kev.Name == ui.keyRepeatName {
 			ui.keyRepeatActive = false
@@ -741,33 +795,33 @@ func (ui *UI) handleGlobalKeyboardEvent(gtx layout.Context, kev key.Event) {
 	}
 }
 
-func (ui *UI) handleGlobalKeyPress(gtx layout.Context, kev key.Event) {
+func (ui *UI) handleGlobalKeyPress(kev key.Event) {
 	switch kev.Name {
 	case key.NameEscape:
-		if ui.createMode {
-			ui.createMode = false
-			gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
-		} else if ui.editMode {
+		if ui.editMode {
 			ui.cancelEditMode()
 		} else {
 			ui.persistLatestSelection()
 			os.Exit(0)
 		}
 	case key.NameUpArrow:
-		if !ui.editMode && !ui.createMode {
+		if !ui.editMode {
 			ui.moveSelectionUp()
 			ui.keyRepeatActive = true
 			ui.keyRepeatName = key.NameUpArrow
 			ui.keyRepeatStart = time.Now()
 		}
 	case key.NameDownArrow:
-		if !ui.editMode && !ui.createMode {
+		if !ui.editMode {
 			ui.moveSelectionDown()
 			ui.keyRepeatActive = true
 			ui.keyRepeatName = key.NameDownArrow
 			ui.keyRepeatStart = time.Now()
 		}
-	case "T":
+	case key.NameReturn:
+		if kev.Modifiers.Contain(key.ModCtrl) && ui.showAddRow() {
+			ui.createFromFilter()
+		}
 		if kev.Modifiers.Contain(key.ModCtrl) {
 			ui.showRichText = !ui.showRichText
 		}
@@ -880,7 +934,7 @@ func (ui *UI) loop() error {
 			}
 
 			// Focus search editor when not in edit mode
-			if !ui.editMode && !ui.createMode {
+			if !ui.editMode {
 				gtx.Execute(key.FocusCmd{Tag: &ui.searchEditor})
 			}
 
@@ -908,7 +962,7 @@ func (ui *UI) loop() error {
 			filters = append(filters, key.Filter{Name: key.NameEscape})
 
 			// Don't filter arrow keys in edit mode - let the editor handle them
-			if !ui.editMode && !ui.createMode {
+			if !ui.editMode {
 				filters = append(filters,
 					key.Filter{Name: key.NameUpArrow},
 					key.Filter{Name: key.NameDownArrow},
@@ -916,6 +970,7 @@ func (ui *UI) loop() error {
 			}
 
 			filters = append(filters,
+				key.Filter{Name: key.NameReturn, Required: key.ModCtrl},
 				key.Filter{Name: "T"},
 				key.Filter{Name: "C"},
 				key.Filter{Name: "L"},
@@ -931,12 +986,12 @@ func (ui *UI) loop() error {
 					break
 				}
 				if kev, ok := ev.(key.Event); ok {
-					ui.handleGlobalKeyboardEvent(gtx, kev)
+					ui.handleGlobalKeyboardEvent(kev)
 				}
 			}
 
 			// Handle key repeat for arrow keys (only when not in edit mode)
-			if ui.keyRepeatActive && !ui.editMode && !ui.createMode {
+			if ui.keyRepeatActive && !ui.editMode {
 				elapsed := time.Since(ui.keyRepeatStart)
 				initialDelay := 200 * time.Millisecond
 				repeatInterval := 30 * time.Millisecond
@@ -962,14 +1017,14 @@ func (ui *UI) loop() error {
 					// Wait for initial delay
 					gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(initialDelay - elapsed)})
 				}
-			} else if (ui.editMode || ui.createMode) && ui.keyRepeatActive {
+			} else if ui.editMode && ui.keyRepeatActive {
 				// Stop key repeat when entering edit mode
 				ui.keyRepeatActive = false
 			}
 			// ===== END OF KEYBOARD HANDLING =====
 
-			// Don't process search editor events when in edit or create mode
-			if !ui.editMode && !ui.createMode {
+			// Don't process search editor events when in edit mode
+			if !ui.editMode {
 				for {
 					ev, ok := ui.searchEditor.Update(gtx)
 					if !ok {
@@ -985,20 +1040,11 @@ func (ui *UI) loop() error {
 							// Channel full, skip this update
 						}
 					case widget.SubmitEvent:
-						ui.copyToClipboard()
-					}
-				}
-			}
-
-			if ui.createMode {
-				for {
-					ev, ok := ui.createEditor.Update(gtx)
-					if !ok {
-						break
-					}
-					switch ev.(type) {
-					case widget.SubmitEvent:
-						ui.createNewPassword()
+						if ui.showAddRow() {
+							ui.createFromFilter()
+						} else {
+							ui.copyToClipboard()
+						}
 					}
 				}
 			}
@@ -1059,10 +1105,46 @@ func (ui *UI) layoutLeftPane(gtx layout.Context) layout.Dimensions {
 }
 
 func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
-	return material.List(ui.theme, &ui.list).Layout(gtx, len(ui.filtered), func(gtx layout.Context, index int) layout.Dimensions {
+	return material.List(ui.theme, &ui.list).Layout(gtx, ui.listRowCount(), func(gtx layout.Context, index int) layout.Dimensions {
 		isSelected := index == ui.selectedIdx
 
-		// First render the content to get its height
+		if ui.showAddRow() {
+			if ui.addRowClickable.Clicked(gtx) {
+				ui.createFromFilter()
+			}
+
+			macro := op.Record(gtx.Ops)
+			dims := layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return ui.addRowClickable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							label := material.Body1(ui.theme, msgAddNewRecord)
+							label.TextSize = unit.Sp(18)
+							d := label.Layout(gtx)
+							if ui.addRowClickable.Hovered() {
+								pointer.CursorPointer.Add(gtx.Ops)
+							}
+							return d
+						})
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(ui.layoutAddButton),
+				)
+			})
+			call := macro.Stop()
+
+			if isSelected {
+				selectionColor := color.NRGBA{R: 100, G: 150, B: 200, A: 100}
+				bgRect := image.Pt(gtx.Constraints.Max.X, dims.Size.Y)
+				defer clip.Rect{Max: bgRect}.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: selectionColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+			}
+
+			call.Add(gtx.Ops)
+			return dims
+		}
+
 		macro := op.Record(gtx.Ops)
 		dims := layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			label := material.Body1(ui.theme, ui.filtered[index].Name)
@@ -1071,7 +1153,6 @@ func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
 		})
 		call := macro.Stop()
 
-		// Draw background if selected, using full width
 		if isSelected {
 			selectionColor := color.NRGBA{R: 100, G: 150, B: 200, A: 100}
 			bgRect := image.Pt(gtx.Constraints.Max.X, dims.Size.Y)
@@ -1080,7 +1161,6 @@ func (ui *UI) layoutPasswordList(gtx layout.Context) layout.Dimensions {
 			paint.PaintOp{}.Add(gtx.Ops)
 		}
 
-		// Draw the content on top
 		call.Add(gtx.Ops)
 		return dims
 	})
@@ -1365,30 +1445,6 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 				)
 			})
 		}),
-		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			if ui.createMode {
-				// Align editor to bottom of the pane
-				return layout.S.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						gtx.Execute(key.FocusCmd{Tag: &ui.createEditor})
-						editor := material.Editor(ui.theme, &ui.createEditor, "path/for/new/password")
-						editor.TextSize = unit.Sp(18)
-						// Add a border to the editor
-						border := widget.Border{Color: color.NRGBA{A: 255}, CornerRadius: unit.Dp(4), Width: unit.Dp(2)}
-						return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							return layout.UniformInset(unit.Dp(8)).Layout(gtx, editor.Layout)
-						})
-					})
-				})
-			}
-			if !ui.editMode && !ui.createMode {
-				// Align button to bottom-right
-				return layout.SE.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(16)).Layout(gtx, ui.layoutAddButton)
-				})
-			}
-			return layout.Dimensions{}
-		}),
 	)
 }
 
@@ -1626,9 +1682,7 @@ func (ui *UI) layoutPasswordField(gtx layout.Context, password string) layout.Di
 
 func (ui *UI) layoutAddButton(gtx layout.Context) layout.Dimensions {
 	if ui.addButton.Clicked(gtx) {
-		ui.createMode = true
-		ui.createEditor.SetText("")
-		gtx.Execute(key.FocusCmd{Tag: &ui.createEditor})
+		ui.createFromFilter()
 	}
 
 	return ui.addButton.Layout(gtx, func(gtx layout.Context) layout.Dimensions {

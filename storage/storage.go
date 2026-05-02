@@ -55,6 +55,22 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 	return fullPath, nil
 }
 
+// Delete removes an entry file under the password store and re-indexes.
+func (s *Storage) Delete(targetPath string) error {
+	cleanTarget := filepath.Clean(targetPath)
+	cleanRoot := filepath.Clean(s.path)
+	rel, err := filepath.Rel(cleanRoot, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("path is outside of storage")
+	}
+	if err := os.Remove(cleanTarget); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	s.invalidateCache(cleanTarget)
+	s.IndexAll()
+	return nil
+}
+
 type Subscriber func(status string)
 
 type Storage struct {
@@ -100,10 +116,13 @@ func (s *Storage) Query(query string) []passcard.StoredItem {
 	queryParts := strings.Split(lowerQuery, " ")
 
 	for _, p := range s.passwords {
-		lowerName := strings.ToLower(p.Name)
+		lowerRel := strings.ToLower(p.RelPath)
 		match := true
 		for _, part := range queryParts {
-			if !strings.Contains(lowerName, part) {
+			if part == "" {
+				continue
+			}
+			if !strings.Contains(lowerRel, part) {
 				match = false
 				break
 			}
@@ -161,15 +180,19 @@ func (s *Storage) IndexAll() {
 		if !strings.HasSuffix(path, ".gpg") {
 			return nil
 		}
-		name := strings.TrimPrefix(path, s.path)
-		name = strings.TrimSuffix(name, ".gpg")
-		name = strings.TrimPrefix(name, "/")
+		rel := strings.TrimPrefix(path, s.path)
+		rel = strings.TrimPrefix(rel, string(filepath.Separator))
+		rel = strings.TrimSuffix(rel, ".gpg")
+		relSlash := filepath.ToSlash(rel)
+
+		displayName := relSlash
 		const MaxLen = 40
-		if len(name) > MaxLen {
-			name = "..." + name[len(name)-MaxLen:]
+		if len(displayName) > MaxLen {
+			displayName = "..." + displayName[len(displayName)-MaxLen:]
 		}
 		newPasswords = append(newPasswords, passcard.StoredItem{
-			Name:    name,
+			Name:    displayName,
+			RelPath: relSlash,
 			Path:    path,
 			Storage: s,
 		})

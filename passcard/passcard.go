@@ -18,7 +18,10 @@ type CacheInterface interface {
 }
 
 type StoredItem struct {
-	Name    string
+	// Name is a truncated display label for long paths (see storage.IndexAll).
+	Name string
+	// RelPath is the store-relative entry path without ".gpg", using "/" separators.
+	RelPath string
 	Path    string
 	Storage CacheInterface
 }
