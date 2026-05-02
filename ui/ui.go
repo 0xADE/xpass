@@ -63,9 +63,12 @@ type UI struct {
 	status       string
 	// clipboardSourceDisplay is the title-case style label for status during clipboard countdown (e.g. Password, Email).
 	clipboardSourceDisplay string
-	countingDown           bool
+	// clipboardSourceEntryName is StoredItem.Name captured when copy succeeded; countdown status must not follow list selection.
+	clipboardSourceEntryName string
+	countingDown             bool
 	countdown              float32
-	countdownDone          chan bool
+	clipboardClearGen      atomic.Uint64
+	clipboardClearWriteMu  sync.Mutex
 	statusMutex            sync.RWMutex
 	decryptFailed          map[string]bool
 
@@ -118,9 +121,8 @@ type debouncedFilterResult struct {
 
 func New(store *storage.Storage, cfg *config.Config) *UI {
 	ui := &UI{
-		storage:       store,
-		config:        cfg,
-		countdownDone: make(chan bool, 1),
+		storage: store,
+		config:  cfg,
 		list: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
@@ -377,25 +379,32 @@ func (ui *UI) copyToClipboard() {
 		return
 	}
 
+	myGen := ui.bumpClipboardClearGeneration()
 	if err := clipboard.WriteAll(pass); err != nil {
 		ui.setStatus(fmt.Sprintf("Failed to copy: %v", err))
 		return
 	}
 
 	ui.clipboardSourceDisplay = clipboardLabelPassword
+	ui.clipboardSourceEntryName = pw.Name
 	ui.setStatus("Copied to clipboard")
-	go ui.clearClipboard()
+	go ui.clearClipboard(myGen)
 }
 
 func (ui *UI) copyFieldToClipboard(value, displayName string) {
+	myGen := ui.bumpClipboardClearGeneration()
 	if err := clipboard.WriteAll(value); err != nil {
 		ui.setStatus(fmt.Sprintf("Failed to copy: %v", err))
 		return
 	}
 
 	ui.clipboardSourceDisplay = displayName
+	ui.clipboardSourceEntryName = ""
+	if ui.selectedIdx >= 0 && ui.selectedIdx < len(ui.filtered) {
+		ui.clipboardSourceEntryName = ui.filtered[ui.selectedIdx].Name
+	}
 	ui.setStatus("Copied to clipboard")
-	go ui.clearClipboard()
+	go ui.clearClipboard(myGen)
 }
 
 func (ui *UI) findFieldValue(keys ...string) string {
@@ -704,19 +713,16 @@ func (ui *UI) createFromFilter() {
 	}
 }
 
-func (ui *UI) clearClipboard() {
+func (ui *UI) bumpClipboardClearGeneration() uint64 {
+	ui.clipboardClearWriteMu.Lock()
+	defer ui.clipboardClearWriteMu.Unlock()
+	return ui.clipboardClearGen.Add(1)
+}
+
+func (ui *UI) clearClipboard(myGen uint64) {
 	ui.statusMutex.Lock()
-	if ui.countdown > 0 {
-		ui.countdown = float32(ui.config.PasswordStoreClipSeconds)
-		ui.statusMutex.Unlock()
-		return
-	}
-	if ui.countingDown {
-		ui.statusMutex.Unlock()
-		ui.countdownDone <- true
-		return
-	}
 	ui.countingDown = true
+	ui.countdown = 1.0
 	ui.statusMutex.Unlock()
 
 	tick := 200 * time.Millisecond
@@ -726,22 +732,17 @@ func (ui *UI) clearClipboard() {
 	remaining := float64(ui.config.PasswordStoreClipSeconds)
 	for {
 		select {
-		case <-ui.countdownDone:
-			ui.statusMutex.Lock()
-			ui.countingDown = false
-			ui.statusMutex.Unlock()
-			return
 		case <-ticker.C:
+			if ui.clipboardClearGen.Load() != myGen {
+				return
+			}
 			ui.statusMutex.Lock()
 			ui.countdown = float32(remaining / float64(ui.config.PasswordStoreClipSeconds))
 			label := ui.clipboardSourceDisplay
 			if label == "" {
 				label = clipboardLabelPassword
 			}
-			entryLabel := ""
-			if ui.selectedIdx >= 0 && ui.selectedIdx < len(ui.filtered) {
-				entryLabel = ui.filtered[ui.selectedIdx].Name
-			}
+			entryLabel := ui.clipboardSourceEntryName
 			if entryLabel == "" {
 				entryLabel = "entry"
 			}
@@ -752,7 +753,13 @@ func (ui *UI) clearClipboard() {
 			}
 			remaining -= tick.Seconds()
 			if remaining <= 0 {
+				ui.clipboardClearWriteMu.Lock()
+				if ui.clipboardClearGen.Load() != myGen {
+					ui.clipboardClearWriteMu.Unlock()
+					return
+				}
 				clipboard.WriteAll("")
+				ui.clipboardClearWriteMu.Unlock()
 				ui.statusMutex.Lock()
 				ui.status = "Clipboard cleared"
 				ui.countingDown = false
@@ -1060,6 +1067,7 @@ func (ui *UI) loop() error {
 
 func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(ui.layoutClipboardProgressBarIfCounting),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Flexed(1, ui.layoutLeftPane),
@@ -1067,16 +1075,19 @@ func (ui *UI) layout(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(ui.layoutRightPane),
 			)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			ui.statusMutex.RLock()
-			countingDown := ui.countingDown
-			ui.statusMutex.RUnlock()
-			if countingDown {
-				return ui.layoutProgressBar(gtx)
-			}
-			return layout.Dimensions{}
-		}),
+		layout.Rigid(ui.layoutClipboardProgressBarIfCounting),
 	)
+}
+
+// layoutClipboardProgressBarIfCounting draws the clipboard-clear countdown bar; used at top and bottom of the window.
+func (ui *UI) layoutClipboardProgressBarIfCounting(gtx layout.Context) layout.Dimensions {
+	ui.statusMutex.RLock()
+	countingDown := ui.countingDown
+	ui.statusMutex.RUnlock()
+	if countingDown {
+		return ui.layoutProgressBar(gtx)
+	}
+	return layout.Dimensions{}
 }
 
 func (ui *UI) layoutLeftPane(gtx layout.Context) layout.Dimensions {
@@ -1402,26 +1413,19 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						ui.statusMutex.RLock()
-						countingDown := ui.countingDown
-						ui.statusMutex.RUnlock()
-						if countingDown {
-							return ui.layoutCountdown(gtx)
-						}
-						return layout.Dimensions{}
-					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if ui.selectedIdx < len(ui.filtered) {
 							name := ui.filtered[ui.selectedIdx].Name
 							label := material.H6(ui.theme, name)
+							label.TextSize = unit.Sp(float32(label.TextSize) * 1.5)
 							label.Color = color.NRGBA{R: 238, G: 238, B: 238, A: 255}
 							label.Alignment = text.Middle
 							return label.Layout(gtx)
 						}
 						return layout.Dimensions{}
 					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if ui.editMode {
 							// Show Save and Cancel buttons in edit mode
@@ -1446,17 +1450,6 @@ func (ui *UI) layoutRightPane(gtx layout.Context) layout.Dimensions {
 			})
 		}),
 	)
-}
-
-func (ui *UI) layoutCountdown(gtx layout.Context) layout.Dimensions {
-	size := gtx.Dp(unit.Dp(100))
-	gtx.Constraints = layout.Exact(image.Pt(size, size))
-
-	defer clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops).Pop()
-	paint.ColorOp{Color: color.NRGBA{R: 102, G: 102, B: 102, A: 255}}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-
-	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
 
 func (ui *UI) layoutProgressBar(gtx layout.Context) layout.Dimensions {
