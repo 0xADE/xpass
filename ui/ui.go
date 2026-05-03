@@ -570,6 +570,11 @@ func (ui *UI) saveEditMode() {
 	}
 	fmt.Printf("DEBUG: Using GPG IDs: %v\n", gpgIDs)
 
+	if err := ui.storage.BackupGPGBeforeOverwrite(item.Path); err != nil {
+		ui.setStatus(fmt.Sprintf("Backup failed: %v", err))
+		return
+	}
+
 	// Encrypt with GPG - add all recipients
 	args := []string{"--encrypt", "--batch", "--yes", "--output", item.Path, "--armor"}
 	for _, gpgID := range gpgIDs {

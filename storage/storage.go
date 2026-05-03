@@ -33,6 +33,10 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 		return "", errors.New("no GPG key configured")
 	}
 
+	if err := s.BackupGPGBeforeOverwrite(fullPath); err != nil {
+		return "", err
+	}
+
 	// Encrypt with GPG - add all recipients
 	args := []string{"--encrypt", "--batch", "--yes", "--output", fullPath, "--armor"}
 	for _, gpgID := range gpgIDs {
@@ -53,6 +57,42 @@ func (s *Storage) Create(name string, content string, gpgIDs []string) (string, 
 	s.IndexAll()
 
 	return fullPath, nil
+}
+
+// BackupGPGBeforeOverwrite writes an Emacs-style backup (path + "~") with a
+// byte-for-byte copy of the current encrypted file when targetPath exists as
+// a regular *.gpg entry under the store. Overwrites an existing backup. No-op
+// if the entry file is missing. Does nothing (returns nil) if targetPath does
+// not end with ".gpg".
+func (s *Storage) BackupGPGBeforeOverwrite(targetPath string) error {
+	cleanTarget := filepath.Clean(targetPath)
+	cleanRoot := filepath.Clean(s.path)
+	rel, err := filepath.Rel(cleanRoot, cleanTarget)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("path is outside of storage")
+	}
+	if !strings.HasSuffix(cleanTarget, ".gpg") {
+		return nil
+	}
+	fi, err := os.Stat(cleanTarget)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat entry: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("entry is not a regular file")
+	}
+	data, err := os.ReadFile(cleanTarget)
+	if err != nil {
+		return fmt.Errorf("read entry for backup: %w", err)
+	}
+	backupPath := cleanTarget + "~"
+	if err := os.WriteFile(backupPath, data, fi.Mode().Perm()); err != nil {
+		return fmt.Errorf("write backup: %w", err)
+	}
+	return nil
 }
 
 // Delete removes an entry file under the password store and re-indexes.
@@ -177,6 +217,9 @@ func (s *Storage) invalidateCache(path string) {
 func (s *Storage) IndexAll() {
 	var newPasswords []passcard.StoredItem
 	walkFn := func(path string, info os.FileInfo, err error) error {
+		if strings.HasSuffix(path, "~") {
+			return nil
+		}
 		if !strings.HasSuffix(path, ".gpg") {
 			return nil
 		}
