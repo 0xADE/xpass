@@ -3,7 +3,6 @@ package ui
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"fmt"
 	"image"
 	"image/color"
@@ -32,6 +31,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"gioui.org/x/component"
 	"gioui.org/x/richtext"
 
 	"github.com/atotto/clipboard"
@@ -66,11 +66,11 @@ type UI struct {
 	// clipboardSourceEntryName is StoredItem.Name captured when copy succeeded; countdown status must not follow list selection.
 	clipboardSourceEntryName string
 	countingDown             bool
-	countdown              float32
-	clipboardClearGen      atomic.Uint64
-	clipboardClearWriteMu  sync.Mutex
-	statusMutex            sync.RWMutex
-	decryptFailed          map[string]bool
+	countdown                float32
+	clipboardClearGen        atomic.Uint64
+	clipboardClearWriteMu    sync.Mutex
+	statusMutex              sync.RWMutex
+	decryptFailed            map[string]bool
 
 	initialized          bool
 	metadataState        richtext.InteractiveText
@@ -100,15 +100,19 @@ type UI struct {
 	keyRepeatStart  time.Time
 
 	// Edit mode
-	editMode        bool
-	isNewCard       bool
-	editModeEditor  widget.Editor
-	modifyButton    widget.Clickable
-	saveButton      widget.Clickable
-	cancelButton    widget.Clickable
-	passgenButton   widget.Clickable
-	addButton       widget.Clickable
-	addRowClickable widget.Clickable
+	editMode             bool
+	isNewCard            bool
+	editModeEditor       widget.Editor
+	modifyButton         widget.Clickable
+	saveButton           widget.Clickable
+	cancelButton         widget.Clickable
+	passgenMainButton    widget.Clickable
+	passgenChevronButton widget.Clickable
+	passgenMenuItems     [4]widget.Clickable
+	passgenMenu          component.MenuState
+	passgenMenuOpen      bool
+	addButton            widget.Clickable
+	addRowClickable      widget.Clickable
 
 	// Latest selection cache (dedupe writes)
 	lastPersistedKey string
@@ -874,24 +878,6 @@ func (ui *UI) handleGlobalKeyPress(kev key.Event) {
 	}
 }
 
-func generatePassword() string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-	const length = 16
-
-	password := make([]byte, length)
-	randomBytes := make([]byte, length)
-
-	if _, err := rand.Read(randomBytes); err != nil {
-		return ""
-	}
-
-	for i := 0; i < length; i++ {
-		password[i] = charset[int(randomBytes[i])%len(charset)]
-	}
-
-	return string(password)
-}
-
 func (ui *UI) Run() error {
 	ui.window = new(app.Window)
 	ui.window.Option(app.Title("xpass"))
@@ -1214,42 +1200,58 @@ func (ui *UI) layoutModifyButton(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (ui *UI) layoutEditModeButtons(gtx layout.Context) layout.Dimensions {
-	// Check for button clicks
-	for ui.passgenButton.Clicked(gtx) {
-		fmt.Println("DEBUG: Passgen button clicked")
-		newPassword := generatePassword()
-		if newPassword != "" {
-			// Get current text
-			currentText := ui.editModeEditor.Text()
-			// Replace first line with new password
-			lines := strings.SplitN(currentText, "\n", 2)
-			if len(lines) > 1 {
-				// Has metadata, keep it
-				ui.editModeEditor.SetText(newPassword + "\n" + lines[1])
-			} else {
-				// Only password, replace it
-				ui.editModeEditor.SetText(newPassword)
-			}
-			ui.setStatus("Password generated")
+func (ui *UI) applyGeneratedPassword(kind PasswordGenKind) {
+	newPassword, err := GeneratePassword(kind)
+	if err != nil || newPassword == "" {
+		if err != nil {
+			ui.setStatus("Password generation failed")
 		}
+		return
 	}
-	for ui.saveButton.Clicked(gtx) {
-		fmt.Println("DEBUG: Save button clicked")
+	currentText := ui.editModeEditor.Text()
+	lines := strings.SplitN(currentText, "\n", 2)
+	if len(lines) > 1 {
+		ui.editModeEditor.SetText(newPassword + "\n" + lines[1])
+	} else {
+		ui.editModeEditor.SetText(newPassword)
+	}
+	ui.setStatus("Password generated")
+}
+
+func (ui *UI) layoutEditModeButtons(gtx layout.Context) layout.Dimensions {
+	if ui.saveButton.Clicked(gtx) {
+		ui.passgenMenuOpen = false
 		ui.saveEditMode()
 	}
-	for ui.cancelButton.Clicked(gtx) {
-		fmt.Println("DEBUG: Cancel button clicked")
+	if ui.cancelButton.Clicked(gtx) {
+		ui.passgenMenuOpen = false
 		ui.cancelEditMode()
+	}
+
+	if ui.passgenChevronButton.Clicked(gtx) {
+		ui.passgenMenuOpen = !ui.passgenMenuOpen
+	}
+	if ui.passgenMainButton.Clicked(gtx) {
+		ui.applyGeneratedPassword(PasswordGenDashSeparated)
+		ui.passgenMenuOpen = false
+	}
+
+	menuKinds := [...]PasswordGenKind{
+		PasswordGenDashSeparated,
+		PasswordGenSpaceSeparated,
+		PasswordGenStrong,
+		PasswordGenLite,
+	}
+	for i := range ui.passgenMenuItems {
+		if ui.passgenMenuItems[i].Clicked(gtx) {
+			ui.applyGeneratedPassword(menuKinds[i])
+			ui.passgenMenuOpen = false
+		}
 	}
 
 	return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceBetween}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			passgenBtn := material.Button(ui.theme, &ui.passgenButton, "Passgen")
-			passgenBtn.TextSize = unit.Sp(14)
-			passgenBtn.Background = color.NRGBA{R: 80, G: 120, B: 180, A: 255}
-			passgenBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-			return passgenBtn.Layout(gtx)
+			return ui.layoutPassgenWithMenu(gtx)
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -1268,6 +1270,62 @@ func (ui *UI) layoutEditModeButtons(gtx layout.Context) layout.Dimensions {
 			return cancelBtn.Layout(gtx)
 		}),
 	)
+}
+
+func (ui *UI) layoutPassgenWithMenu(gtx layout.Context) layout.Dimensions {
+	menuLabels := [...]string{
+		"Space separated",
+		"Dash separated",
+		"Strong",
+		"Lite",
+	}
+	children := []layout.FlexChild{
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(ui.theme, &ui.passgenMainButton, "Generate password")
+					btn.TextSize = unit.Sp(14)
+					btn.Background = color.NRGBA{R: 80, G: 120, B: 180, A: 255}
+					btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+					return btn.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					chev := material.Button(ui.theme, &ui.passgenChevronButton, "▼")
+					chev.TextSize = unit.Sp(12)
+					chev.Background = color.NRGBA{R: 60, G: 100, B: 160, A: 255}
+					chev.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+					return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Max.X = gtx.Dp(unit.Dp(40))
+						gtx.Constraints.Min.X = gtx.Dp(unit.Dp(36))
+						return chev.Layout(gtx)
+					})
+				}),
+			)
+		}),
+	}
+	if ui.passgenMenuOpen {
+		ui.passgenMenu.OptionList.Axis = layout.Vertical
+		ui.passgenMenu.Options = []func(layout.Context) layout.Dimensions{
+			func(gtx layout.Context) layout.Dimensions {
+				return component.MenuItem(ui.theme, &ui.passgenMenuItems[0], menuLabels[0]).Layout(gtx)
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return component.MenuItem(ui.theme, &ui.passgenMenuItems[1], menuLabels[1]).Layout(gtx)
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return component.MenuItem(ui.theme, &ui.passgenMenuItems[2], menuLabels[2]).Layout(gtx)
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return component.MenuItem(ui.theme, &ui.passgenMenuItems[3], menuLabels[3]).Layout(gtx)
+			},
+		}
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return component.Menu(ui.theme, &ui.passgenMenu).Layout(gtx)
+			})
+		}))
+	}
+	return layout.Flex{Axis: layout.Vertical, Alignment: layout.Start}.Layout(gtx, children...)
 }
 
 func (ui *UI) layoutSelectedItemBody(gtx layout.Context) layout.Dimensions {
